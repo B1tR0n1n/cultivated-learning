@@ -2,28 +2,40 @@ import time
 import json
 import uuid
 from core.memory_store import MemoryUnit, MemoryType
+from core.reflection import ReflectionEngine
 
 
 class InteractionLoop:
-    """Main loop: assembles context, generates response, stores memories."""
+    """Main loop: assembles context, generates response, stores memories, reflects."""
 
-    def __init__(self, engine, memory_store, assembler, log_dir=None):
+    def __init__(self, engine, memory_store, assembler, log_dir=None, reflect=True):
         self.engine = engine
         self.memory = memory_store
         self.assembler = assembler
         self.log_dir = log_dir
         self.history = []
         self.interaction_count = 0
+        self.reflect_enabled = reflect
+        self.reflection_engine = None
+
+        if self.reflect_enabled:
+            self.reflection_engine = ReflectionEngine(engine, memory_store)
 
     def chat(self, user_message):
         self.interaction_count += 1
         interaction_id = str(uuid.uuid4())
         start_time = time.time()
 
+        # Get directives from reflection engine if available
+        directives = None
+        if self.reflection_engine:
+            directives = self.reflection_engine.get_directives()
+
         # Assemble context
         prompt = self.assembler.assemble(
             user_message=user_message,
             conversation_history=self.history,
+            directives=directives,
         )
 
         # Generate response
@@ -49,6 +61,17 @@ class InteractionLoop:
         )
         self.memory.store(episodic)
 
+        # Reflection pass (async in future, synchronous for now)
+        if self.reflection_engine:
+            try:
+                reflections = self.reflection_engine.reflect(
+                    user_message, response, interaction_id
+                )
+                if reflections:
+                    print(f"  Reflection: {len(reflections)} new memories generated")
+            except Exception as e:
+                print(f"  Reflection error (non-fatal): {e}")
+
         # Log interaction
         if self.log_dir:
             self._log(interaction_id, user_message, response, prompt, elapsed)
@@ -66,7 +89,7 @@ class InteractionLoop:
 
         # Adjust salience of recent episodic memories
         recent = self.memory.retrieve(last_user, top_k=3)
-        delta = (rating - 3) * 0.1  # rating 1-5 maps to -0.2 to +0.2
+        delta = (rating - 3) * 0.1
         for mem in recent:
             self.memory.adjust_salience(mem.id, delta)
 
@@ -86,10 +109,13 @@ class InteractionLoop:
 
     def status(self):
         stats = self.memory.get_stats()
+        directive_count = len(self.reflection_engine.get_directives()) if self.reflection_engine else 0
         return {
-            "interactions": self.interaction_count,
+            "interaction_count": self.interaction_count,
             "history_length": len(self.history),
             "memory": stats,
+            "active_directives": directive_count,
+            "reflection_enabled": self.reflect_enabled,
         }
 
     def _log(self, interaction_id, user_message, response, prompt, elapsed):

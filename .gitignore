@@ -4,6 +4,9 @@ __pycache__/
 data/memory_db/
 data/interaction_log/
 data/memory_backup.json
+data/cold_storage/
 *_backup.py
 *.bin
 notebooks/Untitled.ipynb
+notebooks/reload_all.ipynb
+notebooks/read_me.ipynb
