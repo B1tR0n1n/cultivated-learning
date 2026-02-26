@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+data/memory_db/
+data/interaction_log/
+data/memory_backup.json
+*_backup.py
+*.bin
+notebooks/Untitled.ipynb
