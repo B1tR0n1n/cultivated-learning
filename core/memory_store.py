@@ -61,7 +61,14 @@ class MemoryUnit:
 
 
 class MemoryStore:
-    """Persistent semantic memory with vector search and salience decay."""
+    """Persistent semantic memory with vector search and salience decay.
+    
+    v3 changes:
+    - supersede() method to mark individual memories as superseded
+    - supersede_by_correction() to find and mark memories that contradict a correction
+    - Breaks hallucination reinforcement loop: wrong answers stored as episodic
+      memories get superseded when the user corrects the record
+    """
 
     def __init__(self, persist_dir, engine=None, decay_rate=0.01):
         self.engine = engine
@@ -115,7 +122,7 @@ class MemoryStore:
                 mem.last_accessed = time.time()
                 mem.access_count += 1
                 self._update_access(mem)
-                similarity = 1 - results["distances"][0][i]  # cosine distance → similarity
+                similarity = 1 - results["distances"][0][i]
                 blended_score = (similarity * similarity_weight) + (mem.salience_score * salience_weight)
                 scored_memories.append((mem, blended_score))
 
@@ -145,6 +152,91 @@ class MemoryStore:
         metadata["salience_score"] = max(0.0, min(1.0, metadata["salience_score"] + delta))
         self.collection.update(ids=[memory_id], metadatas=[metadata])
 
+    def supersede(self, memory_id, superseded_by_id):
+        """Mark a memory as superseded by another memory.
+        Superseded memories are excluded from retrieval."""
+        results = self.collection.get(ids=[memory_id])
+        if not results["ids"]:
+            return
+        metadata = results["metadatas"][0]
+        metadata["superseded_by"] = superseded_by_id
+        metadata["salience_score"] = max(0.0, metadata["salience_score"] - 0.3)
+        self.collection.update(ids=[memory_id], metadatas=[metadata])
+
+    def supersede_by_correction(self, correction_text, correction_id, similarity_threshold=0.45):
+        """Find memories that contradict a correction and mark them superseded.
+        
+        This breaks the hallucination reinforcement loop:
+        1. Model hallucinates wrong answer
+        2. Wrong answer stored as episodic memory  
+        3. Next query retrieves the wrong episodic memory
+        4. Model reinforces the hallucination
+        
+        By superseding memories similar to the correction topic, we prevent
+        step 3 from retrieving the wrong answer.
+        
+        Only targets episodic and semantic memories (not procedural/reflective).
+        Only targets non-correction memories (don't supersede other corrections).
+        """
+        if self.engine is None:
+            return []
+
+        correction_emb = self.engine.get_embedding(correction_text)
+
+        # Get all memories with embeddings
+        all_data = self.collection.get(
+            include=["documents", "metadatas", "embeddings"]
+        )
+
+        superseded = []
+        for i in range(len(all_data["ids"])):
+            metadata = all_data["metadatas"][i]
+            document = all_data["documents"][i]
+            mem_id = all_data["ids"][i]
+
+            # Skip if already superseded
+            if metadata.get("superseded_by", ""):
+                continue
+
+            # Skip procedural and reflective — corrections target facts, not directives
+            if metadata["memory_type"] in ("procedural", "reflective"):
+                continue
+
+            # Skip other corrections — don't supersede user ground truth
+            tags = json.loads(metadata.get("tags", "[]"))
+            if "user_correction" in tags:
+                continue
+
+            # Skip if this IS the correction we're processing
+            if mem_id == correction_id:
+                continue
+
+            # Check semantic similarity
+            if all_data["embeddings"] is not None and all_data["embeddings"][i] is not None:
+                stored_emb = np.array(all_data["embeddings"][i])
+                correction_vec = np.array(correction_emb)
+                similarity = np.dot(correction_vec, stored_emb) / (
+                    np.linalg.norm(correction_vec) * np.linalg.norm(stored_emb)
+                )
+
+                if similarity >= similarity_threshold:
+                    # This memory is about the same topic as the correction
+                    # and is NOT a correction itself — it's likely the wrong answer
+                    self.supersede(mem_id, correction_id)
+                    superseded.append({
+                        "id": mem_id,
+                        "content": document[:80],
+                        "similarity": float(similarity),
+                        "type": metadata["memory_type"],
+                    })
+
+        if superseded:
+            print(f"  Correction superseded {len(superseded)} memories:")
+            for s in superseded:
+                print(f"    [{s['type']}] sim={s['similarity']:.2f} | {s['content']}...")
+
+        return superseded
+
     def decay_pass(self):
         all_memories = self.collection.get()
         updated_ids = []
@@ -171,10 +263,13 @@ class MemoryStore:
 
         types = {}
         saliences = []
+        superseded_count = 0
         for m in all_memories["metadatas"]:
             t = m["memory_type"]
             types[t] = types.get(t, 0) + 1
             saliences.append(m["salience_score"])
+            if m.get("superseded_by", ""):
+                superseded_count += 1
 
         return {
             "total": total,
@@ -182,6 +277,7 @@ class MemoryStore:
             "avg_salience": sum(saliences) / len(saliences),
             "min_salience": min(saliences),
             "max_salience": max(saliences),
+            "superseded": superseded_count,
         }
 
     def _update_access(self, memory: MemoryUnit):

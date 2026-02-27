@@ -4,9 +4,13 @@ from sentence_transformers import SentenceTransformer
 
 
 class InferenceEngine:
-    """Wrapper around the base LLM. All model interaction goes through here."""
+    """Wrapper around the base LLM. All model interaction goes through here.
     
-    def __init__(self, model_path, max_context=4096, 
+    v2 changes:
+    - Default max_context raised from 4096 → 16384
+    """
+    
+    def __init__(self, model_path, max_context=16384, 
                  embedding_model_path="/workspace/models/results/all-MiniLM-L6-v2"):
         self.model_path = model_path
         self.max_context = max_context
@@ -47,7 +51,7 @@ class InferenceEngine:
     def count_tokens(self, text):
         return len(self.tokenizer.encode(text, add_special_tokens=False))
     
-    def generate(self, prompt, max_new_tokens=512, temperature=0.7, top_p=0.9):
+    def generate(self, prompt, max_new_tokens=1024, temperature=0.7, top_p=0.9):
         inputs = self.tokenizer(
             prompt,
             return_tensors="pt",
