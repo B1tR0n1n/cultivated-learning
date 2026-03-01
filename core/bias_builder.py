@@ -63,10 +63,10 @@ class BiasBuilder:
         self.memory = memory_store
 
     def build_bias_map(self):
-        """Build and return a {token_id: -10.0} bias map.
+        """Collect suppression phrases and return the result of suppress_tokens().
 
         Returns:
-            dict mapping token_id (int) to -10.0 float
+            (flat_biases, sequence_suppressions) — see InferenceEngine.suppress_tokens()
         """
         phrases = list(BASE_SUPPRESSIONS)
         seen = {p.lower() for p in phrases}

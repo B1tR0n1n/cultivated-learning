@@ -81,16 +81,18 @@ def heuristic_quality_check(directive):
 
 class ReflectionEngine:
     """Post-interaction recursive self-analysis at increasing depths.
-    
+
     v3 changes:
     - Heuristic filter replaces LLM self-scoring (7B can't judge its own output)
     - Correction-driven directive killing: user corrections check for contradicting directives
     - Startup purge: on load, existing directives run through heuristic filter
-    - Dedup threshold lowered to 0.60 to catch more semantic overlap
+    - Dedup threshold lowered to 0.50 to catch more semantic overlap
+    - GATE 2.5: contradiction pre-check rejects directives that conflict with existing ones
+      before they are stored (depth-3 coherence check only catches issues after the fact)
     """
 
     def __init__(self, engine, memory_store, max_depth=3,
-                 max_directives=6, dedup_threshold=0.60):
+                 max_directives=6, dedup_threshold=0.50):
         self.engine = engine
         self.memory = memory_store
         self.max_depth = max_depth
@@ -251,52 +253,6 @@ class ReflectionEngine:
 
         return killed
 
-    def _depth_0(self, user_message, assistant_response):
-        """Factual: evaluate what happened in this interaction."""
-        prompt = (
-            "[INST] You are a self-reflection module analyzing an interaction.\n\n"
-            f"Interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
-            "Analyze this interaction factually:\n"
-            "1. Was the response accurate and relevant?\n"
-            "2. Did it address what the user actually asked?\n"
-            "3. Were there any errors or misunderstandings?\n\n"
-            "Be brief and specific. One paragraph. [/INST]"
-        )
-        analysis = self.engine.generate_structured(prompt, max_new_tokens=200)
-        return MemoryUnit(
-            content=f"Reflection D0: {analysis}",
-            memory_type=MemoryType.REFLECTIVE,
-            salience_score=0.4, confidence=0.6,
-            tags=["reflection", "depth_0", "factual"],
-        )
-
-    def _depth_1(self, user_message, assistant_response):
-        """Analytical: identify patterns across recent interactions."""
-        recent = self.memory.retrieve(user_message, top_k=5)
-        if len(recent) < 2:
-            return None
-
-        memory_context = "\n".join(
-            [f"- [{m.memory_type.value}] {m.content[:150]}" for m in recent]
-        )
-        prompt = (
-            "[INST] You are a self-reflection module analyzing patterns.\n\n"
-            f"Current interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
-            f"Recent memories:\n{memory_context}\n\n"
-            "What patterns do you notice?\n"
-            "- Recurring user needs or preferences\n"
-            "- Consistent strengths or weaknesses in responses\n"
-            "- Emerging themes across interactions\n\n"
-            "Be brief and specific. One paragraph. [/INST]"
-        )
-        analysis = self.engine.generate_structured(prompt, max_new_tokens=200)
-        return MemoryUnit(
-            content=f"Reflection D1: {analysis}",
-            memory_type=MemoryType.REFLECTIVE,
-            salience_score=0.5, confidence=0.5,
-            tags=["reflection", "depth_1", "analytical"],
-        )
-
     def _depth_2(self, d0_memory, d1_memory):
         """Prescriptive: generate behavioral directives from analysis.
         
@@ -363,6 +319,15 @@ class ReflectionEngine:
             print(f"  Directive rejected (duplicate): {directive[:60]}...")
             return None
 
+        # === GATE 2.5: Contradiction check ===
+        # Depth-3 coherence only detects contradictions after the directive is
+        # stored and in the live list — too late to prevent the problem.
+        # This pre-check rejects directives before they are accepted.
+        contradicts, which = self._is_contradiction(directive)
+        if contradicts:
+            print(f"  Directive rejected (contradicts '{which[:50]}'): {directive[:60]}...")
+            return None
+
         # === GATE 3: Directive cap ===
         displaced_id = None
         if len(self.directives) >= self.max_directives:
@@ -405,6 +370,54 @@ class ReflectionEngine:
             if similarity >= self.dedup_threshold:
                 return True
         return False
+
+    def _is_contradiction(self, candidate):
+        """Check if candidate logically contradicts any existing directive.
+
+        Uses a focused LLM call constrained to 30 tokens with a binary response
+        format. Temperature is set low (0.1) for deterministic output.
+
+        A contradiction means the directives create conflicting behavioral rules
+        (e.g. "keep responses brief" vs "give detailed explanations"). Mere
+        difference in topic or style is not a contradiction.
+
+        Returns:
+            (True, conflicting_directive_text) if a contradiction is found
+            (False, None) otherwise
+        """
+        if not self.directives:
+            return False, None
+
+        directive_list = "\n".join(
+            f"{i+1}. {d}" for i, d in enumerate(self.directives)
+        )
+
+        prompt = (
+            "[INST] Does this proposed directive logically contradict any existing directive?\n\n"
+            f"Proposed: {candidate}\n\n"
+            f"Existing:\n{directive_list}\n\n"
+            "A contradiction means the two directives give CONFLICTING behavioral rules, "
+            "e.g. 'be brief' vs 'give detailed answers', or 'use technical terms' vs 'use simple language'.\n\n"
+            "Respond with exactly one of:\n"
+            "CONTRADICTS: <number>\n"
+            "OK\n\n"
+            "If in doubt, respond OK. [/INST]"
+        )
+
+        result = self.engine.generate_structured(prompt, max_new_tokens=30, temperature=0.1)
+        result_stripped = result.strip()
+
+        if result_stripped.upper().startswith("CONTRADICTS"):
+            parts = result_stripped.split(":", 1)
+            if len(parts) > 1:
+                num_str = "".join(c for c in parts[1] if c.isdigit())
+                if num_str:
+                    idx = int(num_str) - 1
+                    if 0 <= idx < len(self.directives):
+                        return True, self.directives[idx]
+            return True, "an existing directive"
+
+        return False, None
 
     def _displace_weakest(self, new_directive):
         """If at cap, displace weakest directive. Returns displaced ID, or None if not displaced."""

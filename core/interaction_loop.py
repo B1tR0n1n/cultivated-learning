@@ -216,6 +216,34 @@ class InteractionLoop:
             "context_window": self.assembler.max_context,
         }
 
+    def update_log_feedback(self, interaction_id, updates):
+        """Patch feedback data into an existing interaction log file.
+
+        Args:
+            interaction_id: UUID of the interaction to update. No-op if None
+                            or the log file doesn't exist.
+            updates: Dict with any subset of:
+                       rating          → int, overwrites existing value
+                       corrections     → list of {type, content} dicts, appended
+                       segment_ratings → list of {sentence_index, sentence, rating}, appended
+        """
+        if not self.log_dir or not interaction_id:
+            return
+        import os
+        path = os.path.join(self.log_dir, f"{interaction_id}.json")
+        if not os.path.exists(path):
+            return
+        with open(path, "r") as f:
+            entry = json.load(f)
+        if "rating" in updates:
+            entry["rating"] = updates["rating"]
+        if "corrections" in updates:
+            entry.setdefault("corrections", []).extend(updates["corrections"])
+        if "segment_ratings" in updates:
+            entry.setdefault("segment_ratings", []).extend(updates["segment_ratings"])
+        with open(path, "w") as f:
+            json.dump(entry, f, indent=2)
+
     def _log(self, interaction_id, user_message, response, prompt, elapsed):
         import os
         os.makedirs(self.log_dir, exist_ok=True)
@@ -228,6 +256,9 @@ class InteractionLoop:
             "response_tokens": self.engine.count_tokens(response),
             "elapsed_seconds": round(elapsed, 2),
             "memory_count": self.memory.collection.count(),
+            "rating": None,
+            "corrections": [],
+            "segment_ratings": [],
         }
         path = os.path.join(self.log_dir, f"{interaction_id}.json")
         with open(path, "w") as f:

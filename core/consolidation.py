@@ -5,7 +5,7 @@ from core.memory_store import MemoryUnit, MemoryType
 class ConsolidationEngine:
     """Distills fading episodic memories into durable semantic memories."""
 
-    def __init__(self, engine, memory_store, salience_threshold=0.4, min_cluster=2):
+    def __init__(self, engine, memory_store, salience_threshold=0.5, min_cluster=2):
         self.engine = engine
         self.memory = memory_store
         self.salience_threshold = salience_threshold

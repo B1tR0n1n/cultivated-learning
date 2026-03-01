@@ -3,7 +3,6 @@ import time
 import math
 import uuid
 import chromadb
-import numpy as np
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Tuple
 from enum import Enum
@@ -129,7 +128,7 @@ class MemoryStore:
         scored_memories.sort(key=lambda x: x[1], reverse=True)
         return [m for m, s in scored_memories[:top_k]]
 
-    def retrieve_by_type(self, memory_type: MemoryType, limit=20):
+    def retrieve_by_type(self, memory_type: MemoryType, limit=50):
         """Retrieve memories of a specific type, excluding superseded ones.
 
         FIX: Previously returned superseded memories, which meant the consolidation
@@ -222,12 +221,9 @@ class MemoryStore:
 
             # Check semantic similarity
             if all_data["embeddings"] is not None and all_data["embeddings"][i] is not None:
-                stored_emb = np.array(all_data["embeddings"][i])
-                correction_vec = np.array(correction_emb)
-                similarity = np.dot(correction_vec, stored_emb) / (
-                    np.linalg.norm(correction_vec) * np.linalg.norm(stored_emb)
+                similarity = self.engine.cosine_similarity(
+                    correction_emb, all_data["embeddings"][i]
                 )
-
                 if similarity >= similarity_threshold:
                     # This memory is about the same topic as the correction
                     # and is NOT a correction itself — it's likely the wrong answer

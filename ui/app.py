@@ -84,13 +84,27 @@ def chat(message, history):
     Note: When loop.history trims to 20 messages (10 turns), the chatbox
     will also lose older messages. This is intentional — the UI should
     reflect what the model actually has access to.
+
+    Returns 11 values: clears the message box, updates the chatbot, stores the
+    response in state, auto-populates segment feedback, and resets the
+    whole-response rating section back to defaults.
     """
     response = loop.chat(message)
     gradio_history = [
         {"role": h["role"], "content": h["content"]}
         for h in loop.history
     ]
-    return "", gradio_history, response
+    # Auto-populate segment feedback section with the new response
+    sentences = split_sentences(response)
+    if sentences:
+        seg_display = "\n".join(f"[{i+1}] {s}" for i, s in enumerate(sentences))
+        seg_slider_update = gr.update(visible=True, minimum=1, maximum=len(sentences), value=1)
+        first_sentence = sentences[0]
+    else:
+        seg_display = ""
+        seg_slider_update = gr.update(visible=False, minimum=1, maximum=1, value=1)
+        first_sentence = ""
+    return "", gradio_history, response, seg_display, seg_slider_update, first_sentence, 3, 3, "Freetext", "", ""
 
 
 # ── Correction template registry ─────────────────────────────────────────────
@@ -186,36 +200,43 @@ def give_feedback(rating, correction_type, correction_content, target_query):
             msg += f" Targeted at: '{tq[:50]}'"
         if content:
             msg += " Freetext correction stored."
-        return msg
 
-    # All structured types: record rating for salience adjustment, then handle correction
-    loop.feedback(rating=rating, correction=None, target_query=tq)
+    else:
+        # All structured types: record rating for salience adjustment, then handle correction
+        loop.feedback(rating=rating, correction=None, target_query=tq)
 
-    if correction_type == "Forget...":
-        similar = memory.retrieve(content, top_k=5)
-        forget_mem = MemoryUnit(
-            content=f"Forget {content}",
-            memory_type=MemoryType.SEMANTIC,
-            salience_score=0.5,
-            confidence=1.0,
-            tags=["user_correction", "forget"],
-        )
-        memory.store(forget_mem)
-        for m in similar:
-            memory.supersede(m.id, forget_mem.id)
-        return (f"Rating {rating} recorded. Forgot: superseded {len(similar)} memories "
-                f"matching '{content[:50]}'.")
+        if correction_type == "Forget...":
+            similar = memory.retrieve(content, top_k=5)
+            forget_mem = MemoryUnit(
+                content=f"Forget {content}",
+                memory_type=MemoryType.SEMANTIC,
+                salience_score=0.5,
+                confidence=1.0,
+                tags=["user_correction", "forget"],
+            )
+            memory.store(forget_mem)
+            for m in similar:
+                memory.supersede(m.id, forget_mem.id)
+            msg = (f"Rating {rating} recorded. Forgot: superseded {len(similar)} memories "
+                   f"matching '{content[:50]}'.")
 
-    if correction_type == "Ignore...":
-        similar = memory.retrieve(content, top_k=5)
-        for m in similar:
-            memory.adjust_salience(m.id, -0.4)
-        return (f"Rating {rating} recorded. Ignored: reduced salience of {len(similar)} "
-                f"memories matching '{content[:50]}'.")
+        elif correction_type == "Ignore...":
+            similar = memory.retrieve(content, top_k=5)
+            for m in similar:
+                memory.adjust_salience(m.id, -0.4)
+            msg = (f"Rating {rating} recorded. Ignored: reduced salience of {len(similar)} "
+                   f"memories matching '{content[:50]}'.")
 
-    _, full_content, suffix = _apply_structured_correction(correction_type, content)
-    label = correction_type.rstrip(".").rstrip(":").strip()
-    return f"Rating {rating} recorded. [{label}] stored: '{full_content[:70]}'{suffix}"
+        else:
+            _, full_content, suffix = _apply_structured_correction(correction_type, content)
+            label = correction_type.rstrip(".").rstrip(":").strip()
+            msg = f"Rating {rating} recorded. [{label}] stored: '{full_content[:70]}'{suffix}"
+
+    log_update = {"rating": rating}
+    if content:
+        log_update["corrections"] = [{"type": correction_type, "content": content[:200]}]
+    loop.update_log_feedback(loop.last_interaction_id, log_update)
+    return msg
 
 
 def load_segments(response_text):
@@ -250,9 +271,8 @@ def select_sentence(response_text, sentence_idx):
     return ""
 
 
-def submit_segment_feedback(response_text, sentence_idx, seg_rating,
-                             seg_corr_type, seg_corr_content):
-    """Store per-sentence feedback: adjust related memory salience, optionally add correction."""
+def submit_segment_feedback(response_text, sentence_idx, seg_rating):
+    """Adjust salience of memories that influenced a specific sentence."""
     sentences = split_sentences(response_text)
     i = int(sentence_idx) - 1
     if not sentences or not (0 <= i < len(sentences)):
@@ -277,45 +297,59 @@ def submit_segment_feedback(response_text, sentence_idx, seg_rating,
     )
     memory.store(seg_mem)
 
-    msg = (f"Sentence {i+1} rated {seg_rating}: "
-           f"adjusted {len(similar)} related memories by {delta:+.2f}.")
+    loop.update_log_feedback(loop.last_interaction_id, {
+        "segment_ratings": [{"sentence_index": i + 1, "sentence": sentence[:150], "rating": int(seg_rating)}],
+    })
+    return (f"Sentence {i+1} rated {seg_rating}: "
+            f"adjusted {len(similar)} related memories by {delta:+.2f}.")
 
-    content = seg_corr_content.strip()
-    if content:
-        if seg_corr_type == "Freetext":
-            corr_mem = MemoryUnit(
-                content=f"CORRECTION: {content}",
-                memory_type=MemoryType.SEMANTIC,
-                salience_score=0.9,
-                confidence=1.0,
-                tags=["user_correction", "high_priority"],
-            )
-            memory.store(corr_mem)
-            memory.supersede_by_correction(content, corr_mem.id, similarity_threshold=0.45)
-            msg += " Freetext correction stored."
-        elif seg_corr_type == "Forget...":
-            sim2 = memory.retrieve(content, top_k=5)
-            forget_mem = MemoryUnit(
-                content=f"Forget {content}",
-                memory_type=MemoryType.SEMANTIC,
-                salience_score=0.5,
-                confidence=1.0,
-                tags=["user_correction", "forget"],
-            )
-            memory.store(forget_mem)
-            for m in sim2:
-                memory.supersede(m.id, forget_mem.id)
-            msg += f" Forgot: superseded {len(sim2)} memories."
-        elif seg_corr_type == "Ignore...":
-            sim2 = memory.retrieve(content, top_k=5)
-            for m in sim2:
-                memory.adjust_salience(m.id, -0.4)
-            msg += f" Ignored: reduced salience of {len(sim2)} memories."
-        elif seg_corr_type in _STRUCTURED_CORRECTIONS:
-            _, full_content, suffix = _apply_structured_correction(seg_corr_type, content)
-            label = seg_corr_type.rstrip(".").rstrip(":").strip()
-            msg += f" [{label}] stored: '{full_content[:50]}'{suffix}"
 
+def apply_correction(correction_type, content):
+    """Apply a standalone correction not tied to any specific response or sentence."""
+    content = content.strip()
+    if not content:
+        return "Enter correction content."
+
+    if correction_type == "Freetext":
+        corr_mem = MemoryUnit(
+            content=f"CORRECTION: {content}",
+            memory_type=MemoryType.SEMANTIC,
+            salience_score=0.9,
+            confidence=1.0,
+            tags=["user_correction", "high_priority"],
+        )
+        memory.store(corr_mem)
+        memory.supersede_by_correction(content, corr_mem.id, similarity_threshold=0.45)
+        msg = f"Freetext correction stored: '{content[:70]}'"
+
+    elif correction_type == "Forget...":
+        similar = memory.retrieve(content, top_k=5)
+        forget_mem = MemoryUnit(
+            content=f"Forget {content}",
+            memory_type=MemoryType.SEMANTIC,
+            salience_score=0.5,
+            confidence=1.0,
+            tags=["user_correction", "forget"],
+        )
+        memory.store(forget_mem)
+        for m in similar:
+            memory.supersede(m.id, forget_mem.id)
+        msg = f"Forgot: superseded {len(similar)} memories matching '{content[:50]}'."
+
+    elif correction_type == "Ignore...":
+        similar = memory.retrieve(content, top_k=5)
+        for m in similar:
+            memory.adjust_salience(m.id, -0.4)
+        msg = f"Ignored: reduced salience of {len(similar)} memories matching '{content[:50]}'."
+
+    else:
+        _, full_content, suffix = _apply_structured_correction(correction_type, content)
+        label = correction_type.rstrip(".").rstrip(":").strip()
+        msg = f"[{label}] stored: '{full_content[:70]}'{suffix}"
+
+    loop.update_log_feedback(loop.last_interaction_id, {
+        "corrections": [{"type": correction_type, "content": content[:200]}],
+    })
     return msg
 
 
@@ -691,11 +725,15 @@ def export_session_report():
     # ── Logit bias suppressions ───────────────────────────────────────────────
     lines.append("## Active Logit Bias Suppressions")
     lines.append("")
-    bias_map = engine._logit_biases
-    if bias_map:
-        for token_id, bias in bias_map.items():
+    flat_biases = engine._flat_biases
+    seq_suppressions = engine._sequence_suppressions
+    if flat_biases or seq_suppressions:
+        for token_id, bias in flat_biases.items():
             token_str = engine.tokenizer.decode([token_id])
-            lines.append(f"- `{token_str}` (token {token_id}, bias {bias:+.1f})")
+            lines.append(f"- `{token_str}` (token {token_id}, bias {bias:+.1f}) [single-token]")
+        for seq in seq_suppressions:
+            phrase = engine.tokenizer.decode(seq)
+            lines.append(f"- `{phrase}` ({len(seq)} tokens) [sequence]")
     else:
         lines.append("None active.")
     lines.append("")
@@ -735,6 +773,24 @@ def export_session_report():
             response_text = entry.get("response", "").replace("\n", "  \n> ")
             lines.append(f"> {response_text}")
             lines.append("")
+
+            rating_val = entry.get("rating")
+            corrections_val = entry.get("corrections", [])
+            seg_ratings_val = entry.get("segment_ratings", [])
+            if rating_val is not None or corrections_val or seg_ratings_val:
+                lines.append("**Feedback:**")
+                lines.append("")
+                if rating_val is not None:
+                    lines.append(f"- Rating: {rating_val}/5")
+                for c in corrections_val:
+                    lines.append(f"- Correction [{c.get('type', '?')}]: {c.get('content', '')[:100]}")
+                for s in seg_ratings_val:
+                    lines.append(
+                        f"- Segment {s.get('sentence_index', '?')} "
+                        f"rated {s.get('rating', '?')}/5: "
+                        f"\"{s.get('sentence', '')[:80]}\""
+                    )
+                lines.append("")
 
     content = "\n".join(lines)
     with open(filepath, "w", encoding="utf-8") as f:
@@ -799,8 +855,7 @@ with gr.Blocks(title="Cultivated Learning", theme=b1tr0n1n, css="""
         with gr.Row():
             msg = gr.Textbox(label="Message", placeholder="Speak...", scale=5)
             send_btn = gr.Button("Send", variant="primary", scale=1)
-        send_btn.click(fn=chat, inputs=[msg, chatbox], outputs=[msg, chatbox, last_response_state])
-        msg.submit(fn=chat, inputs=[msg, chatbox], outputs=[msg, chatbox, last_response_state])
+        # Event handlers wired after Feedback tab so output components are defined first
 
     with gr.Tab("Feedback"):
         gr.Markdown("### Whole-Response Rating")
@@ -846,18 +901,6 @@ with gr.Blocks(title="Cultivated Learning", theme=b1tr0n1n, css="""
         )
         selected_sentence = gr.Textbox(label="Selected sentence", interactive=False, lines=2)
         seg_rating = gr.Slider(minimum=1, maximum=5, step=1, value=3, label="Segment rating")
-        with gr.Row():
-            seg_corr_type = gr.Dropdown(
-                choices=_ALL_CORRECTION_CHOICES,
-                value="Freetext",
-                label="Correction type",
-                scale=2,
-            )
-            seg_corr_content = gr.Textbox(
-                label="Content",
-                placeholder="Optional correction for this sentence...",
-                scale=4,
-            )
         submit_seg_btn = gr.Button("Submit Segment Feedback", variant="primary")
         seg_output = gr.Textbox(label="Result", interactive=False)
 
@@ -873,8 +916,31 @@ with gr.Blocks(title="Cultivated Learning", theme=b1tr0n1n, css="""
         )
         submit_seg_btn.click(
             fn=submit_segment_feedback,
-            inputs=[last_response_state, seg_idx, seg_rating, seg_corr_type, seg_corr_content],
+            inputs=[last_response_state, seg_idx, seg_rating],
             outputs=[seg_output],
+        )
+
+        gr.Markdown("---")
+        gr.Markdown("### Corrections")
+        gr.Markdown("Apply a behavioral or factual correction independent of any specific response.")
+        with gr.Row():
+            standalone_corr_type = gr.Dropdown(
+                choices=_ALL_CORRECTION_CHOICES,
+                value="Freetext",
+                label="Correction type",
+                scale=2,
+            )
+            standalone_corr_content = gr.Textbox(
+                label="Content",
+                placeholder="Fill in the rest of the template...",
+                scale=4,
+            )
+        standalone_corr_btn = gr.Button("Apply", variant="primary")
+        standalone_corr_output = gr.Textbox(label="Result", interactive=False)
+        standalone_corr_btn.click(
+            fn=apply_correction,
+            inputs=[standalone_corr_type, standalone_corr_content],
+            outputs=standalone_corr_output,
         )
 
         gr.Markdown("---")
@@ -980,6 +1046,18 @@ with gr.Blocks(title="Cultivated Learning", theme=b1tr0n1n, css="""
         export_btn = gr.Button("Export Session Report", variant="primary")
         export_output = gr.Textbox(label="Result", interactive=False, lines=4)
         export_btn.click(fn=export_session_report, outputs=export_output)
+
+    # ── Chat event handlers ───────────────────────────────────────────────────
+    # Wired here (after all tab components) because the outputs include
+    # Feedback tab components: sentences_display, seg_idx, selected_sentence,
+    # seg_rating, seg_corr_content — which aren't defined until that tab block.
+    _chat_outputs = [
+        msg, chatbox, last_response_state,
+        sentences_display, seg_idx, selected_sentence, seg_rating,
+        rating, correction_type, correction_content, target_query,
+    ]
+    send_btn.click(fn=chat, inputs=[msg, chatbox], outputs=_chat_outputs)
+    msg.submit(fn=chat, inputs=[msg, chatbox], outputs=_chat_outputs)
 
 
 app.launch(server_name="0.0.0.0", server_port=7880, share=False)

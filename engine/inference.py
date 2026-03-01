@@ -7,16 +7,35 @@ from sentence_transformers import SentenceTransformer
 class LogitBiasProcessor(LogitsProcessor):
     """Applies additive biases to specific token logits at each generation step.
 
-    Used to suppress instruct-isms and user-corrected phrases. A bias of -10.0
-    effectively removes a token from consideration without hard-blocking it.
+    Two suppression modes:
+
+    flat_biases — {token_id: bias} applied unconditionally at every step.
+    Used only for single-token phrases (e.g. "Certainly!" is one token).
+
+    sequence_suppressions — list of token-ID sequences. For each sequence
+    [t0, t1, ..., tN], tN is penalized only when input_ids currently ends
+    with [t0, ..., t(N-1)]. This blocks a multi-word phrase from completing
+    without broadly suppressing common component tokens like ▁I, ▁Of, ▁As.
     """
 
-    def __init__(self, bias_map):
-        self.bias_map = bias_map  # {token_id (int): bias (float)}
+    def __init__(self, flat_biases, sequence_suppressions):
+        self.flat_biases = flat_biases              # {token_id: float}
+        self.sequence_suppressions = sequence_suppressions  # [[token_id, ...], ...]
 
     def __call__(self, input_ids, scores):
-        for token_id, bias in self.bias_map.items():
+        for token_id, bias in self.flat_biases.items():
             scores[:, token_id] += bias
+
+        if self.sequence_suppressions:
+            tail = input_ids[0].tolist()
+            for seq in self.sequence_suppressions:
+                if len(seq) < 2:
+                    continue
+                prefix = seq[:-1]
+                target_token = seq[-1]
+                if tail[-len(prefix):] == prefix:
+                    scores[:, target_token] += -10.0
+
         return scores
 
 
@@ -36,7 +55,8 @@ class InferenceEngine:
         self.tokenizer = None
         self.device = None
         self.embedding_model = None
-        self._logit_biases = {}  # {token_id: bias} — set via set_logit_biases()
+        self._flat_biases = {}             # {token_id: bias} for single-token suppressions
+        self._sequence_suppressions = []   # [[token_id, ...]] for multi-token phrases
     
     def load(self):
         # Load Mistral for generation
@@ -78,8 +98,8 @@ class InferenceEngine:
         ).to(self.device)
         
         processors = LogitsProcessorList()
-        if self._logit_biases:
-            processors.append(LogitBiasProcessor(self._logit_biases))
+        if self._flat_biases or self._sequence_suppressions:
+            processors.append(LogitBiasProcessor(self._flat_biases, self._sequence_suppressions))
 
         with torch.no_grad():
             output_ids = self.model.generate(
@@ -164,32 +184,47 @@ class InferenceEngine:
         self.tokenizer.padding_side = "right"
         return responses
 
-    def set_logit_biases(self, bias_map):
-        """Replace the active logit bias map. Called before each generation pass."""
-        self._logit_biases = bias_map
+    def set_logit_biases(self, bias_data):
+        """Store logit bias data returned by suppress_tokens().
+
+        Args:
+            bias_data: (flat_biases, sequence_suppressions) tuple
+        """
+        self._flat_biases, self._sequence_suppressions = bias_data
 
     def suppress_tokens(self, phrases):
-        """Tokenize phrases and build a bias map suppressing the first token of each.
+        """Tokenize phrases and build suppression structures.
 
-        Applying -10.0 to the first token of a phrase is sufficient to prevent
-        the model from opening with that phrase. Returns the bias map (does not
-        set it — caller decides whether to apply it).
+        Single-token phrases are added to a flat bias map and suppressed
+        unconditionally at every generation step.
+
+        Multi-token phrases are stored as sequences. Only the final token of
+        each sequence is penalized, and only when input_ids currently ends with
+        the preceding tokens. This blocks "Of course!" without suppressing the
+        token ▁Of in unrelated contexts.
 
         Args:
             phrases: List of strings to suppress
 
         Returns:
-            {token_id (int): -10.0} dict
+            (flat_biases, sequence_suppressions) where:
+              flat_biases:          {token_id (int): -10.0}
+              sequence_suppressions: [[token_id (int), ...], ...]
         """
-        bias_map = {}
+        flat_biases = {}
+        sequence_suppressions = []
         for phrase in phrases:
             phrase = phrase.strip()
             if not phrase:
                 continue
             token_ids = self.tokenizer.encode(phrase, add_special_tokens=False)
-            if token_ids:
-                bias_map[token_ids[0]] = -10.0
-        return bias_map
+            if not token_ids:
+                continue
+            if len(token_ids) == 1:
+                flat_biases[token_ids[0]] = -10.0
+            else:
+                sequence_suppressions.append(token_ids)
+        return flat_biases, sequence_suppressions
 
     def cosine_similarity(self, vec_a, vec_b):
         """Compute cosine similarity between two vectors.
