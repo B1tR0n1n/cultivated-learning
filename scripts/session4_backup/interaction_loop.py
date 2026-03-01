@@ -5,15 +5,6 @@ from core.memory_store import MemoryUnit, MemoryType
 from core.reflection import ReflectionEngine
 from evaluation.metrics import EvaluationMetrics
 
-# Phrases that indicate the user is asking for fabricated/hypothetical content.
-# Episodic memories created during these interactions are tagged "speculative"
-# and stored at low salience so they don't pollute factual retrieval.
-_FABRICATION_TRIGGERS = {
-    "make up", "made up", "imagine", "invent", "invented",
-    "pretend", "create a fictional", "hypothetical",
-    "make something up", "come up with a fictional", "fictional scenario",
-}
-
 
 class InteractionLoop:
     """Main loop: assembles context, generates response, stores memories, reflects, measures.
@@ -76,21 +67,17 @@ class InteractionLoop:
         if len(self.history) > 20:
             self.history = self.history[-20:]
 
-        user_lower = user_message.lower()
-        is_speculative = any(trigger in user_lower for trigger in _FABRICATION_TRIGGERS)
         episodic = MemoryUnit(
             content=f"User: {user_message}\nAssistant: {response[:200]}",
             memory_type=MemoryType.EPISODIC,
             source_interaction_id=interaction_id,
-            salience_score=0.2 if is_speculative else 0.5,
-            tags=["interaction"] + (["speculative"] if is_speculative else []),
+            salience_score=0.5,
+            tags=["interaction"],
         )
-        if is_speculative:
-            print(f"  Fabrication detected: episodic stored as speculative (salience=0.2)")
         self.memory.store(episodic)
 
         reflection_calls = 0
-        if self.reflection_engine and self.interaction_count % 3 == 0:
+        if self.reflection_engine:
             try:
                 reflections = self.reflection_engine.reflect(
                     user_message, response, interaction_id

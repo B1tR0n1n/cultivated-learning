@@ -178,7 +178,7 @@ class ReflectionEngine:
         d0 = MemoryUnit(
             content=f"Reflection D0: {results[0]}",
             memory_type=MemoryType.REFLECTIVE,
-            salience_score=0.2, confidence=0.6,
+            salience_score=0.4, confidence=0.6,
             tags=["reflection", "depth_0", "factual"],
         )
         new_memories.append(d0)
@@ -188,7 +188,7 @@ class ReflectionEngine:
             d1 = MemoryUnit(
                 content=f"Reflection D1: {results[1]}",
                 memory_type=MemoryType.REFLECTIVE,
-                salience_score=0.3, confidence=0.5,
+                salience_score=0.5, confidence=0.5,
                 tags=["reflection", "depth_1", "analytical"],
             )
             new_memories.append(d1)
