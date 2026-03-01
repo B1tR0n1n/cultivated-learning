@@ -1,6 +1,7 @@
 import time
 import json
 import os
+import numpy as np
 from core.memory_store import MemoryUnit, MemoryType
 
 
@@ -73,8 +74,11 @@ class ColdStorage:
             if entry["embedding"] is None:
                 continue
 
-            # FIX: Use engine's shared cosine_similarity instead of manual numpy
-            similarity = self.engine.cosine_similarity(query_embedding, entry["embedding"])
+            query_vec = np.array(query_embedding)
+            stored_vec = np.array(entry["embedding"])
+            similarity = np.dot(query_vec, stored_vec) / (
+                np.linalg.norm(query_vec) * np.linalg.norm(stored_vec)
+            )
 
             if similarity >= self.resurface_threshold:
                 mem = MemoryUnit.from_chroma(

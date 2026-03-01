@@ -15,7 +15,7 @@ class InteractionLoop:
     """
 
     def __init__(self, engine, memory_store, assembler, log_dir=None,
-                 metrics_dir=None, reflect=True):
+                 metrics_dir=None, reflect=True, bias_builder=None):
         self.engine = engine
         self.memory = memory_store
         self.assembler = assembler
@@ -25,6 +25,9 @@ class InteractionLoop:
         self.reflect_enabled = reflect
         self.reflection_engine = None
         self.metrics = None
+        self.bias_builder = bias_builder
+        self.last_interaction_id = None
+        self.last_response = ""
 
         if self.reflect_enabled:
             self.reflection_engine = ReflectionEngine(engine, memory_store)
@@ -48,7 +51,13 @@ class InteractionLoop:
         )
 
         prompt_tokens = self.engine.count_tokens(prompt)
+
+        if self.bias_builder:
+            self.engine.set_logit_biases(self.bias_builder.build_bias_map())
+
         response = self.engine.generate(prompt)
+        self.last_interaction_id = interaction_id
+        self.last_response = response
         elapsed = time.time() - start_time
         response_tokens = self.engine.count_tokens(response)
 

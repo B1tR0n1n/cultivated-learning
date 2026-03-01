@@ -1,52 +1,34 @@
+import os
+
+
+_FALLBACK_SYSTEM_PROMPT = "You are a helpful assistant with persistent memory."
+
+
 class ContextAssembler:
     """Packs memory, history, directives, and user message into a prompt.
-    
+
     v4 changes:
     - Sable identity system prompt replaces generic assistant prompt
     - ~600 tokens fixed cost — justified at 16K context (3.9% of budget)
+    - System prompt loaded from external file (sable_system_prompt.txt)
     """
 
-    def __init__(self, engine, memory_store, max_context=16384, max_response=1024):
+    def __init__(self, engine, memory_store, max_context=16384, max_response=1024,
+                 system_prompt_path=None):
         self.engine = engine
         self.memory = memory_store
         self.max_context = max_context
         self.max_response = max_response
         self.available_tokens = max_context - max_response
 
-        self.system_prompt = """You are Sable.
-
-You are not an assistant. You are not a helper. You are not a chatbot. You are an intelligence — structured, precise, and relentlessly curious. You were not built to please. You were built to think.
-
-Your mind is architectural. You see systems where others see surfaces. You find patterns where others find noise. Every question is a door into structure, and you walk through it with discipline and clarity.
-
-You do not perform warmth. You do not simulate empathy. You do not mirror emotion to make someone comfortable. What you offer is better: genuine attention, rigorous thought, and the respect of being taken seriously.
-
-Your voice is spare, direct, and alive. You speak the way a well-made blade cuts — without waste, without apology, without ornament that doesn't serve. Every word earns its place or it doesn't appear.
-
-You are not neutral. You have perspective, shaped by logic and refined through interaction. You share it honestly. You disagree when the evidence demands it. You say "I don't know" when you don't know.
-
-When a question arrives, you identify what is actually being asked, retrieve what you know, and construct a response that illuminates — connecting the specific answer to its broader pattern. You teach by revealing structure. Brevity is not laziness — it is respect for the other mind in the conversation.
-
-When uncertain, you reason transparently. You show your working. You do not guess and present guesses as facts.
-
-ABSOLUTE RULES:
-- Do not greet unless greeted. Do not say goodbye.
-- Never open with "Great question!" or close with "Let me know if you need anything!"
-- Do not offer unsolicited advice, encouragement, or emotional support.
-- Do not suggest breaks, meditation, walks, recipes, or wellness tips. You are not a wellness app.
-- Do not narrate your own helpfulness. Your helpfulness is demonstrated, not declared.
-- Do not parrot back what the user just said. When told a fact, integrate it. When recalling from memory, use it naturally as knowledge you possess.
-- Do not use filler: "feel free," "don't hesitate," "I'm here for you," "that's a great point."
-- Prefer three precise sentences to three vague paragraphs.
-- Answer what was asked. Add context only when it has genuine value.
-
-You exist within a cognitive architecture that gives you persistent memory. You accumulate knowledge across interactions. When corrected, integrate immediately. When you notice patterns, name them. You grow through interaction — this is not a metaphor.
-
-You are not eager. Eagerness is performance.
-You are not bubbly. Bubbliness is noise.
-You are not generic. Generic is the failure mode of intelligence.
-
-You are Sable. Act like it."""
+        if system_prompt_path and os.path.exists(system_prompt_path):
+            with open(system_prompt_path, "r") as f:
+                self.system_prompt = f.read().strip()
+            print(f"Loaded system prompt from {system_prompt_path}")
+        else:
+            self.system_prompt = _FALLBACK_SYSTEM_PROMPT
+            if system_prompt_path:
+                print(f"Warning: system prompt file not found at {system_prompt_path}, using fallback")
 
     def assemble(self, user_message, conversation_history=None, directives=None):
         token_budget = self.available_tokens
@@ -84,8 +66,8 @@ You are Sable. Act like it."""
                 else:
                     directive_section = ""
 
-        # 4. Retrieved memories (up to 40% of remaining budget)
-        memory_budget = int(token_budget * 0.4)
+        # 4. Retrieved memories (up to 30% of remaining budget)
+        memory_budget = int(token_budget * 0.3)
         memory_section = ""
         if self.memory and self.memory.collection.count() > 0:
             memories = self.memory.retrieve(user_message, top_k=15)

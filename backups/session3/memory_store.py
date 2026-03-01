@@ -130,13 +130,6 @@ class MemoryStore:
         return [m for m, s in scored_memories[:top_k]]
 
     def retrieve_by_type(self, memory_type: MemoryType, limit=20):
-        """Retrieve memories of a specific type, excluding superseded ones.
-
-        FIX: Previously returned superseded memories, which meant the consolidation
-        engine could pull in corrected episodic memories and distill them into new
-        semantic facts — resurrecting wrong information through a back door.
-        Now filters superseded memories the same way retrieve() does.
-        """
         results = self.collection.get(
             where={"memory_type": memory_type.value},
             limit=limit,
@@ -148,9 +141,7 @@ class MemoryStore:
                 document=results["documents"][i],
                 metadata=results["metadatas"][i],
             )
-            # FIX: filter out superseded memories (matches retrieve() behavior)
-            if mem.superseded_by is None:
-                memories.append(mem)
+            memories.append(mem)
         return memories
 
     def adjust_salience(self, memory_id, delta):

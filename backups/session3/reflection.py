@@ -1,5 +1,6 @@
 import time
 import re
+import numpy as np
 from core.memory_store import MemoryUnit, MemoryType
 
 
@@ -102,12 +103,7 @@ class ReflectionEngine:
 
     def _load_directives(self):
         """Load existing procedural directives from memory.
-        Runs heuristic filter on load — purges directives that shouldn't exist.
-
-        Also callable from the UI to force a reload after manual pruning.
-        Without this, manually deleting directives from ChromaDB leaves the
-        in-memory list stale until the next full restart.
-        """
+        Runs heuristic filter on load — purges directives that shouldn't exist."""
         procedural = self.memory.retrieve_by_type(MemoryType.PROCEDURAL)
         procedural.sort(key=lambda m: m.salience_score, reverse=True)
 
@@ -134,64 +130,17 @@ class ReflectionEngine:
               f"({len(procedural) - len(kept)} purged on startup).")
 
     def reflect(self, user_message, assistant_response, interaction_id):
-        """Run reflection pass at all depths. Returns list of new memories created.
-
-        Depths 0 and 1 are batched into a single model call. Depth 2 and 3
-        run sequentially as before (each depends on prior results).
-        """
+        """Run reflection pass at all depths. Returns list of new memories created."""
         new_memories = []
 
-        # --- Build prompts for depth 0 and depth 1 ---
-        prompt_d0 = (
-            "[INST] You are a self-reflection module analyzing an interaction.\n\n"
-            f"Interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
-            "Analyze this interaction factually:\n"
-            "1. Was the response accurate and relevant?\n"
-            "2. Did it address what the user actually asked?\n"
-            "3. Were there any errors or misunderstandings?\n\n"
-            "Be brief and specific. One paragraph. [/INST]"
-        )
+        d0 = self._depth_0(user_message, assistant_response)
+        if d0:
+            new_memories.append(d0)
 
-        recent = self.memory.retrieve(user_message, top_k=5)
-        prompt_d1 = None
-        if len(recent) >= 2:
-            memory_context = "\n".join(
-                [f"- [{m.memory_type.value}] {m.content[:150]}" for m in recent]
-            )
-            prompt_d1 = (
-                "[INST] You are a self-reflection module analyzing patterns.\n\n"
-                f"Current interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
-                f"Recent memories:\n{memory_context}\n\n"
-                "What patterns do you notice?\n"
-                "- Recurring user needs or preferences\n"
-                "- Consistent strengths or weaknesses in responses\n"
-                "- Emerging themes across interactions\n\n"
-                "Be brief and specific. One paragraph. [/INST]"
-            )
-
-        # --- Batch generate d0 (and d1 if applicable) ---
-        prompts = [prompt_d0] + ([prompt_d1] if prompt_d1 else [])
-        results = self.engine.generate_batch(prompts, max_new_tokens=200, temperature=0.3)
-
-        d0 = MemoryUnit(
-            content=f"Reflection D0: {results[0]}",
-            memory_type=MemoryType.REFLECTIVE,
-            salience_score=0.4, confidence=0.6,
-            tags=["reflection", "depth_0", "factual"],
-        )
-        new_memories.append(d0)
-
-        d1 = None
-        if prompt_d1:
-            d1 = MemoryUnit(
-                content=f"Reflection D1: {results[1]}",
-                memory_type=MemoryType.REFLECTIVE,
-                salience_score=0.5, confidence=0.5,
-                tags=["reflection", "depth_1", "analytical"],
-            )
+        d1 = self._depth_1(user_message, assistant_response)
+        if d1:
             new_memories.append(d1)
 
-        # --- Depth 2 and 3 sequentially ---
         d2 = self._depth_2(d0, d1)
         if d2:
             new_memories.append(d2)
@@ -224,17 +173,10 @@ class ReflectionEngine:
         # is about the behavior being corrected = kill it
         i = 0
         while i < len(self.directives):
-            # Bounds check: the two lists must always be the same length.
-            # If they're not, something appended to one without updating the other.
-            if i >= len(self.directive_ids):
-                print(f"  check_correction_conflicts: directive_ids desync at index {i} "
-                      f"(directives={len(self.directives)}, ids={len(self.directive_ids)}) — skipping")
-                i += 1
-                continue
-
             directive_emb = self.engine.get_embedding(self.directives[i])
-            # FIX: Use engine's shared cosine_similarity instead of manual numpy
-            similarity = self.engine.cosine_similarity(correction_emb, directive_emb)
+            similarity = np.dot(correction_emb, directive_emb) / (
+                np.linalg.norm(correction_emb) * np.linalg.norm(directive_emb)
+            )
 
             # Threshold: 0.45 is deliberately low — corrections are phrased
             # differently from directives, so even moderate similarity is a signal
@@ -364,16 +306,15 @@ class ReflectionEngine:
             return None
 
         # === GATE 3: Directive cap ===
-        displaced_id = None
         if len(self.directives) >= self.max_directives:
-            displaced_id = self._displace_weakest(directive)
-            if displaced_id is None:
+            displaced = self._displace_weakest(directive)
+            if not displaced:
                 print(f"  Directive rejected (cap full): {directive[:60]}...")
                 return None
 
-        # Accepted — create the MemoryUnit first so its ID is known, then
-        # append both lists in adjacent lines. They must never be modified
-        # independently; directive_ids[i] must always correspond to directives[i].
+        # Accepted
+        self.directives.append(directive)
+
         mem = MemoryUnit(
             content=directive,
             memory_type=MemoryType.PROCEDURAL,
@@ -381,12 +322,7 @@ class ReflectionEngine:
             confidence=0.7,
             tags=["reflection", "depth_2", "directive", "auto_generated"],
         )
-        self.directives.append(directive)
         self.directive_ids.append(mem.id)
-
-        # Supersede the displaced directive with the new one
-        if displaced_id is not None:
-            self.memory.supersede(displaced_id, mem.id)
 
         print(f"  Directive accepted: {directive[:60]}...")
         return mem
@@ -400,16 +336,17 @@ class ReflectionEngine:
 
         for existing in self.directives:
             existing_emb = self.engine.get_embedding(existing)
-            # FIX: Use engine's shared cosine_similarity instead of manual numpy
-            similarity = self.engine.cosine_similarity(candidate_emb, existing_emb)
+            similarity = np.dot(candidate_emb, existing_emb) / (
+                np.linalg.norm(candidate_emb) * np.linalg.norm(existing_emb)
+            )
             if similarity >= self.dedup_threshold:
                 return True
         return False
 
     def _displace_weakest(self, new_directive):
-        """If at cap, displace weakest directive. Returns displaced ID, or None if not displaced."""
+        """If at cap, displace weakest directive. Returns True if displaced."""
         if not self.directive_ids:
-            return None
+            return False
 
         weakest_idx = None
         weakest_salience = float('inf')
@@ -423,19 +360,20 @@ class ReflectionEngine:
                     weakest_idx = i
 
         if weakest_idx is None:
-            return None
+            return False
 
         # New directive starts at 0.7 — must be stronger than weakest
         if 0.7 <= weakest_salience:
-            return None
+            return False
 
         old_id = self.directive_ids[weakest_idx]
         old_content = self.directives[weakest_idx]
+        self.memory.adjust_salience(old_id, -0.4)
         print(f"  Displaced directive: {old_content[:60]}...")
 
         self.directives.pop(weakest_idx)
         self.directive_ids.pop(weakest_idx)
-        return old_id
+        return True
 
     def _depth_3(self):
         """Meta-coherence: check directives for contradictions."""
