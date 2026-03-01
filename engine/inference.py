@@ -65,7 +65,7 @@ class InferenceEngine:
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_path,
-            torch_dtype=torch.float16,   # FIX: was 'dtype' — HF silently ignored it, loading float32
+            dtype=torch.float16,          # Transformers 4.57+: use dtype, not torch_dtype
             device_map="auto",
             local_files_only=True
         )
