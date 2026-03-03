@@ -1,9 +1,10 @@
+import warnings; warnings.filterwarnings("ignore")
+import os; os.environ["PYTHONWARNINGS"] = "ignore"
 import sys
-import os
 
 # FIX: Use environment variables with sensible defaults instead of hardcoded paths
-BASE_DIR = os.environ.get("CL_BASE_DIR", "/workspace/Projects/cultivated-learning")
-MODEL_PATH = os.environ.get("CL_MODEL_PATH", "/workspace/models/results/Mistral-7B-Instruct-v0.3")
+BASE_DIR = os.environ.get("CL_BASE_DIR", "/workspace/Projects/cultivated-learning-24b")
+MODEL_PATH = os.environ.get("CL_MODEL_PATH", "/workspace/models/results/Mistral-Small-24B-Instruct-2501-AWQ")
 
 sys.path.insert(0, BASE_DIR)
 
@@ -77,34 +78,15 @@ def split_sentences(text):
 def chat(message, history):
     """Process a chat message through the full pipeline.
 
-    FIX: Previously maintained a separate history list from loop.history,
-    causing desync between what the user sees and what the model sees.
-    Now uses loop.history as the single source of truth.
-
-    Note: When loop.history trims to 20 messages (10 turns), the chatbox
-    will also lose older messages. This is intentional — the UI should
-    reflect what the model actually has access to.
-
-    Returns 11 values: clears the message box, updates the chatbot, stores the
-    response in state, auto-populates segment feedback, and resets the
-    whole-response rating section back to defaults.
+    Returns 6 values: clears message box, updates chatbot, stores response
+    in state, and resets the feedback controls to defaults.
     """
     response = loop.chat(message)
     gradio_history = [
         {"role": h["role"], "content": h["content"]}
         for h in loop.history
     ]
-    # Auto-populate segment feedback section with the new response
-    sentences = split_sentences(response)
-    if sentences:
-        seg_display = "\n".join(f"[{i+1}] {s}" for i, s in enumerate(sentences))
-        seg_slider_update = gr.update(visible=True, minimum=1, maximum=len(sentences), value=1)
-        first_sentence = sentences[0]
-    else:
-        seg_display = ""
-        seg_slider_update = gr.update(visible=False, minimum=1, maximum=1, value=1)
-        first_sentence = ""
-    return "", gradio_history, response, seg_display, seg_slider_update, first_sentence, 3, 3, "Freetext", "", ""
+    return "", gradio_history, response, 3, "Freetext", "", quick_status()
 
 
 # ── Correction template registry ─────────────────────────────────────────────
@@ -237,6 +219,11 @@ def give_feedback(rating, correction_type, correction_content, target_query):
         log_update["corrections"] = [{"type": correction_type, "content": content[:200]}]
     loop.update_log_feedback(loop.last_interaction_id, log_update)
     return msg
+
+
+def give_feedback_main(rating, correction_type, correction_content):
+    """Main-view feedback wrapper — defaults target_query to last interaction."""
+    return give_feedback(rating, correction_type, correction_content, ""), quick_status()
 
 
 def load_segments(response_text):
@@ -513,7 +500,7 @@ def get_directives():
         count, cap = loop.reflection_engine.get_directive_count()
         if directives:
             header = f"Active directives ({count}/{cap}):\n"
-            return header + "\n".join([f"{i+1}. {d}" for i, d in enumerate(directives)])
+            return header + "\n".join([f"{i+1}. {d.content}" for i, d in enumerate(directives)])
     return "No active directives."
 
 
@@ -715,7 +702,7 @@ def export_session_report():
         directives = loop.reflection_engine.get_directives()
         if directives:
             for i, d in enumerate(directives):
-                lines.append(f"{i + 1}. {d}")
+                lines.append(f"{i + 1}. {d.content}")
         else:
             lines.append("None.")
     else:
@@ -799,6 +786,128 @@ def export_session_report():
     return f"Saved: {filepath}\n({len(log_files)} interactions logged, {stats['total']} memories)"
 
 
+# --- Test Runner ---
+
+_test_prompts = []
+_test_cursor = 0
+
+_TR_DECAY = {25, 50, 75, 100}
+_TR_CONSOLIDATION = {50, 100}
+
+
+def _format_researcher_notes(entry):
+    """Build the researcher notes display for a prompt entry."""
+    if entry is None:
+        return ""
+    lines = []
+    num = entry.get("number", "?")
+    cat = entry.get("category", "")
+    lines.append(f"#{num} \u2014 {cat}")
+    expected = entry.get("expected_behavior")
+    if expected:
+        lines.append(f"Expected: {expected}")
+    notes = entry.get("researcher_notes")
+    if notes:
+        lines.append(f"Researcher: {notes}")
+    correction = entry.get("suggested_correction")
+    if correction:
+        lines.append(f"Suggested correction: {correction}")
+    if not expected and not notes and not correction:
+        lines.append("(no researcher notes)")
+    return "\n".join(lines)
+
+
+def load_test_prompts():
+    """Load the 100-prompt evaluation file and reset cursor."""
+    global _test_prompts, _test_cursor
+    import json as _json
+    path = os.path.join(BASE_DIR, "data/test_prompts_100.json")
+    try:
+        with open(path, "r") as f:
+            _test_prompts = _json.load(f)
+    except FileNotFoundError:
+        return "Not loaded \u2014 file not found", ""
+    _test_cursor = 0
+    first_notes = _format_researcher_notes(_test_prompts[0]) if _test_prompts else ""
+    return f"Prompt 0/{len(_test_prompts)} \u2014 Ready ({len(_test_prompts)} loaded)", first_notes
+
+
+def _advance_test_prompt():
+    """Run the next test prompt. Returns 7-element UI tuple, or None if done."""
+    global _test_cursor
+    if not _test_prompts or _test_cursor >= len(_test_prompts):
+        return None
+
+    entry = _test_prompts[_test_cursor]
+    prompt_num = entry.get("number", _test_cursor + 1)
+    prompt_text = entry.get("prompt", "")
+
+    response = loop.chat(prompt_text)
+
+    # --- Checkpoint automation ---
+    if prompt_num in _TR_DECAY:
+        memory.decay_pass()
+
+    if prompt_num in _TR_CONSOLIDATION:
+        consolidator.consolidate()
+
+    _test_cursor += 1
+
+    # Progress
+    if _test_cursor >= len(_test_prompts):
+        progress = f"Complete: {len(_test_prompts)}/{len(_test_prompts)} \u2014 All prompts finished"
+    else:
+        next_cat = _test_prompts[_test_cursor].get("category", "")
+        progress = f"Prompt {_test_cursor}/{len(_test_prompts)} \u2014 {next_cat}"
+
+    notes = _format_researcher_notes(entry)
+    gradio_history = [{"role": h["role"], "content": h["content"]} for h in loop.history]
+
+    return (gradio_history, response, progress, notes, 3, "Freetext", "", quick_status())
+
+
+def run_next_test_prompt():
+    """Run one test prompt. Conversation appears in the chatbox."""
+    result = _advance_test_prompt()
+    if result is None:
+        done = f"Complete: {len(_test_prompts)}/{len(_test_prompts)}" if _test_prompts else "No prompts loaded."
+        return (gr.update(), gr.update(), done, "Run finished.",
+                gr.update(), gr.update(), gr.update(), quick_status())
+    return result
+
+
+def run_all_test_prompts():
+    """Generator: run all remaining prompts, yielding after each."""
+    if not _test_prompts or _test_cursor >= len(_test_prompts):
+        done = f"Complete: {len(_test_prompts)}/{len(_test_prompts)}" if _test_prompts else "No prompts loaded."
+        yield (gr.update(), gr.update(), done, "No prompts remaining.",
+               gr.update(), gr.update(), gr.update(), quick_status())
+        return
+    while _test_cursor < len(_test_prompts):
+        result = _advance_test_prompt()
+        if result is None:
+            break
+        yield result
+
+
+def stop_test_run():
+    """Update progress to show the run was stopped."""
+    if _test_prompts and _test_cursor < len(_test_prompts):
+        return f"Stopped at {_test_cursor}/{len(_test_prompts)} -- click Run Next or Run All to continue"
+    return gr.update()
+
+
+def quick_status():
+    """Compact status readout for the main view."""
+    stats = memory.get_stats()
+    dc = 0
+    if loop.reflection_engine:
+        dc, _ = loop.reflection_engine.get_directive_count()
+    refl = "ON" if loop.reflect_enabled else "OFF"
+    return (f"Interactions: {loop.interaction_count}  |  Memories: {stats['total']}\n"
+            f"Directives: {dc}  |  Reflection: {refl}")
+
+
 # --- Theme ---
 
 b1tr0n1n = gr.themes.Base(
@@ -839,225 +948,307 @@ b1tr0n1n = gr.themes.Base(
 
 # --- Layout ---
 
+_S = "<span style='font-size:10px;text-transform:uppercase;letter-spacing:2px;color:#7a7060'>"
+_RULE = "<div style='border-top:1px solid #2a2620;margin:16px 0 12px'></div>"
+
 with gr.Blocks(title="Cultivated Learning", theme=b1tr0n1n, css="""
-    .gradio-container { max-width: 900px !important; }
+    .gradio-container {
+        max-width: 1280px !important;
+        padding: 16px 24px !important;
+    }
     footer { display: none !important; }
-    .tab-nav button { font-size: 11px !important; letter-spacing: 1.5px !important; text-transform: uppercase !important; }
+
+    /* Header */
+    .cl-header { margin-bottom: 4px !important; }
+    .cl-header h1 {
+        font-size: 18px !important;
+        letter-spacing: 4px !important;
+        font-weight: 400 !important;
+        color: #c9a227 !important;
+        margin: 0 !important;
+    }
+    .cl-subtitle {
+        font-size: 10px !important;
+        letter-spacing: 2px !important;
+        color: #5a5245 !important;
+        margin: -4px 0 12px 0 !important;
+        font-style: italic;
+    }
+
+    /* Tab bar */
+    .tab-nav button {
+        font-size: 9px !important;
+        letter-spacing: 2.5px !important;
+        text-transform: uppercase !important;
+        padding: 6px 14px !important;
+    }
+
+    /* Compact buttons */
+    .cl-btn-row button {
+        min-height: 34px !important;
+        max-height: 34px !important;
+        font-size: 11px !important;
+        letter-spacing: 1px !important;
+    }
+
+    /* Compact slider */
+    .cl-rating .label-wrap { font-size: 11px !important; }
+
+    /* Quick status: monospace readout */
+    .cl-qs textarea {
+        font-size: 10px !important;
+        line-height: 1.5 !important;
+        color: #7a7060 !important;
+        border: 1px solid #1a1814 !important;
+        background: #0a0908 !important;
+    }
+
+    /* Feedback result line */
+    .cl-fb-result textarea {
+        font-size: 10px !important;
+        color: #7a7060 !important;
+        border: none !important;
+        background: transparent !important;
+        padding: 2px 0 !important;
+    }
+
+    /* Progress line */
+    .cl-progress textarea {
+        font-size: 11px !important;
+        color: #c9a227 !important;
+        border: 1px solid #2a2620 !important;
+    }
+
+    /* Section labels */
+    .cl-section-label p {
+        font-size: 9px !important;
+        text-transform: uppercase !important;
+        letter-spacing: 2.5px !important;
+        color: #5a5245 !important;
+        margin: 0 0 6px 0 !important;
+    }
+
+    /* Notes accordion */
+    .cl-notes .label-wrap {
+        font-size: 10px !important;
+        padding: 4px 8px !important;
+    }
+
+    /* Chatbox breathing room */
+    .cl-chat { margin-bottom: 0 !important; }
+
+    /* Send row alignment */
+    .cl-send-row { margin-top: 4px !important; }
+
+    /* Right panel internal spacing */
+    .cl-right-panel > div { margin-bottom: 0 !important; }
+
+    /* Correction row compactness */
+    .cl-corr-row .wrap { gap: 4px !important; }
 """) as app:
 
-    gr.Markdown("# 🌱 CULTIVATED LEARNING")
-    gr.Markdown("*Frozen model. Growing mind. — b1tr0n1n*")
+    # Header
+    gr.Markdown("# \U0001F331 CULTIVATED LEARNING", elem_classes=["cl-header"])
+    gr.Markdown("Frozen model. Growing mind.", elem_classes=["cl-subtitle"])
 
     last_response_state = gr.State("")
 
-    with gr.Tab("Chat"):
-        chatbox = gr.Chatbot(label="Conversation", height=420)
-        with gr.Row():
-            msg = gr.Textbox(label="Message", placeholder="Speak...", scale=5)
-            send_btn = gr.Button("Send", variant="primary", scale=1)
-        # Event handlers wired after Feedback tab so output components are defined first
+    with gr.Row():
 
-    with gr.Tab("Feedback"):
-        gr.Markdown("### Whole-Response Rating")
-        rating = gr.Slider(minimum=1, maximum=5, step=1, value=3, label="Rating")
-        with gr.Row():
-            correction_type = gr.Dropdown(
-                choices=_ALL_CORRECTION_CHOICES,
-                value="Freetext",
-                label="Correction type",
-                scale=2,
+        # LEFT: Conversation (dominant)
+        with gr.Column(scale=7, min_width=500):
+            chatbox = gr.Chatbot(
+                label="Conversation", height=560,
+                elem_classes=["cl-chat"],
             )
-            correction_content = gr.Textbox(
-                label="Content",
-                placeholder="Fill in the rest of the template...",
-                scale=4,
+            with gr.Row(elem_classes=["cl-send-row"]):
+                msg = gr.Textbox(
+                    show_label=False, placeholder="Speak...",
+                    scale=7, lines=1, max_lines=1,
+                )
+                send_btn = gr.Button("Send", variant="primary", scale=1, min_width=80)
+
+        # RIGHT: Test Runner + Feedback + Status (stacked)
+        with gr.Column(scale=3, min_width=300, elem_classes=["cl-right-panel"]):
+
+            # -- Test Runner --
+            gr.Markdown("TEST", elem_classes=["cl-section-label"])
+            with gr.Row(elem_classes=["cl-btn-row"]):
+                tr_load_btn = gr.Button("Load", variant="secondary", scale=1, min_width=60)
+                tr_next_btn = gr.Button("Next", variant="primary", scale=1, min_width=60)
+                tr_all_btn = gr.Button("All", variant="secondary", scale=1, min_width=60)
+                tr_stop_btn = gr.Button("Stop", variant="secondary", scale=1, min_width=60)
+            tr_progress = gr.Textbox(
+                show_label=False, value="Not loaded", interactive=False,
+                lines=1, max_lines=1, elem_classes=["cl-progress"],
             )
-        target_query = gr.Textbox(
-            label="About (optional)",
-            placeholder="What topic is this feedback about? Leave blank for last interaction.",
-        )
-        fb_btn = gr.Button("Submit", variant="primary")
-        fb_output = gr.Textbox(label="Result", interactive=False)
-        fb_btn.click(
-            fn=give_feedback,
-            inputs=[rating, correction_type, correction_content, target_query],
-            outputs=fb_output,
-        )
+            with gr.Accordion("Notes", open=False, elem_classes=["cl-notes"]):
+                tr_notes = gr.Textbox(
+                    show_label=False, interactive=False, lines=3,
+                    placeholder="Load prompts to see researcher notes.",
+                )
 
-        gr.Markdown("---")
-        gr.Markdown("### Segment Feedback")
-        gr.Markdown("Rate individual sentences. Each sentence's salience adjustments target only the memories that influenced it.")
-        load_seg_btn = gr.Button("Load Response Segments", variant="secondary")
-        sentences_display = gr.Textbox(
-            label="Sentences",
-            interactive=False,
-            lines=6,
-            placeholder="Click 'Load Response Segments' after a chat message.",
-        )
-        seg_idx = gr.Slider(
-            minimum=1, maximum=1, step=1, value=1,
-            label="Sentence #",
-            visible=False,
-        )
-        selected_sentence = gr.Textbox(label="Selected sentence", interactive=False, lines=2)
-        seg_rating = gr.Slider(minimum=1, maximum=5, step=1, value=3, label="Segment rating")
-        submit_seg_btn = gr.Button("Submit Segment Feedback", variant="primary")
-        seg_output = gr.Textbox(label="Result", interactive=False)
+            gr.HTML(_RULE)
 
-        load_seg_btn.click(
-            fn=load_segments,
-            inputs=[last_response_state],
-            outputs=[sentences_display, seg_idx, selected_sentence],
-        )
-        seg_idx.change(
-            fn=select_sentence,
-            inputs=[last_response_state, seg_idx],
-            outputs=[selected_sentence],
-        )
-        submit_seg_btn.click(
-            fn=submit_segment_feedback,
-            inputs=[last_response_state, seg_idx, seg_rating],
-            outputs=[seg_output],
-        )
-
-        gr.Markdown("---")
-        gr.Markdown("### Corrections")
-        gr.Markdown("Apply a behavioral or factual correction independent of any specific response.")
-        with gr.Row():
-            standalone_corr_type = gr.Dropdown(
-                choices=_ALL_CORRECTION_CHOICES,
-                value="Freetext",
-                label="Correction type",
-                scale=2,
+            # -- Feedback --
+            gr.Markdown("FEEDBACK", elem_classes=["cl-section-label"])
+            rating = gr.Slider(
+                minimum=1, maximum=5, step=1, value=3,
+                label="Rating", elem_classes=["cl-rating"],
             )
-            standalone_corr_content = gr.Textbox(
-                label="Content",
-                placeholder="Fill in the rest of the template...",
-                scale=4,
+            with gr.Row(elem_classes=["cl-corr-row"]):
+                correction_type = gr.Dropdown(
+                    choices=_ALL_CORRECTION_CHOICES, value="Freetext",
+                    show_label=False, scale=2, min_width=100,
+                )
+                correction_content = gr.Textbox(
+                    show_label=False, placeholder="Correction...",
+                    scale=5, lines=1, max_lines=1,
+                )
+            fb_btn = gr.Button("Submit Feedback", variant="primary", elem_classes=["cl-btn-row"])
+            fb_output = gr.Textbox(
+                show_label=False, interactive=False,
+                lines=1, max_lines=1, elem_classes=["cl-fb-result"],
             )
-        standalone_corr_btn = gr.Button("Apply", variant="primary")
-        standalone_corr_output = gr.Textbox(label="Result", interactive=False)
-        standalone_corr_btn.click(
-            fn=apply_correction,
-            inputs=[standalone_corr_type, standalone_corr_content],
-            outputs=standalone_corr_output,
-        )
 
-        gr.Markdown("---")
-        gr.Markdown("### Adaptation Evidence")
-        adapt_type = gr.Dropdown(choices=["help", "harm"], value="help", label="Event Type")
-        adapt_desc = gr.Textbox(label="Description", placeholder="What happened?")
-        adapt_btn = gr.Button("Log Event", variant="secondary")
-        adapt_output = gr.Textbox(label="Result", interactive=False)
-        adapt_btn.click(fn=log_adaptation_event, inputs=[adapt_type, adapt_desc], outputs=adapt_output)
+            gr.HTML(_RULE)
 
-    with gr.Tab("Memory"):
-        gr.Markdown("### Browse")
-        with gr.Row():
-            mem_type = gr.Dropdown(
-                choices=["All", "Episodic", "Semantic", "Procedural", "Reflective"],
-                value="All", label="Filter by type"
+            # -- Quick Status --
+            gr.Markdown("STATUS", elem_classes=["cl-section-label"])
+            qs_display = gr.Textbox(
+                show_label=False, interactive=False,
+                lines=2, max_lines=2,
+                value=quick_status(),
+                elem_classes=["cl-qs"],
             )
-            browse_btn = gr.Button("Browse", variant="primary")
-        mem_output = gr.Textbox(label="Memories", interactive=False, lines=15)
-        browse_btn.click(fn=browse_memories, inputs=[mem_type], outputs=mem_output)
 
-        gr.Markdown("---")
-        gr.Markdown("### Directives")
-        with gr.Row():
-            dir_btn = gr.Button("Show Active Directives", variant="secondary")
-            reload_btn = gr.Button("Reload from Memory", variant="secondary")
-        dir_output = gr.Textbox(label="Directives", interactive=False, lines=6)
-        dir_btn.click(fn=get_directives, outputs=dir_output)
-        reload_btn.click(fn=reload_directives, outputs=dir_output)
+    # ══════════════════════════════════════════════════════════════════════════
+    #  TABS (secondary tools, full width below workspace)
+    # ══════════════════════════════════════════════════════════════════════════
 
-    with gr.Tab("Evaluation"):
-        gr.Markdown("### Longitudinal Metrics")
-        eval_btn = gr.Button("Generate Report", variant="primary")
-        eval_output = gr.Textbox(label="Evaluation Report", interactive=False, lines=30)
-        eval_btn.click(fn=get_evaluation_report, outputs=eval_output)
+    with gr.Tabs():
 
-    with gr.Tab("Maintenance"):
-        gr.Markdown("### Consolidation")
-        gr.Markdown("Distill fading episodic memories into durable semantic memories.")
-        consol_btn = gr.Button("Run Consolidation", variant="primary")
-        consol_output = gr.Textbox(label="Result", interactive=False, lines=6)
-        consol_btn.click(fn=run_consolidation, outputs=consol_output)
+        with gr.Tab("Memory"):
+            with gr.Row():
+                mem_type = gr.Dropdown(
+                    choices=["All", "Episodic", "Semantic", "Procedural", "Reflective"],
+                    value="All", label="Filter by type", scale=3,
+                )
+                browse_btn = gr.Button("Browse", variant="primary", scale=1)
+                dir_btn = gr.Button("Directives", variant="secondary", scale=1)
+                reload_btn = gr.Button("Reload", variant="secondary", scale=1)
+            mem_output = gr.Textbox(label="Memories", interactive=False, lines=14)
+            browse_btn.click(fn=browse_memories, inputs=[mem_type], outputs=mem_output)
+            dir_output = gr.Textbox(label="Directives", interactive=False, lines=5)
+            dir_btn.click(fn=get_directives, outputs=dir_output)
+            reload_btn.click(fn=reload_directives, outputs=dir_output)
 
-        gr.Markdown("---")
-        gr.Markdown("### Decay")
-        gr.Markdown("Apply salience decay to all memories.")
-        decay_btn = gr.Button("Run Decay Pass", variant="secondary")
-        decay_output = gr.Textbox(label="Result", interactive=False)
-        decay_btn.click(fn=run_decay, outputs=decay_output)
+        with gr.Tab("Evaluation"):
+            eval_btn = gr.Button("Generate Report", variant="primary")
+            eval_output = gr.Textbox(label="Evaluation Report", interactive=False, lines=28)
+            eval_btn.click(fn=get_evaluation_report, outputs=eval_output)
 
-        gr.Markdown("---")
-        gr.Markdown("### Cold Storage")
-        gr.Markdown("Archive faded memories. Resurface on strong semantic match.")
-        with gr.Row():
-            archive_btn = gr.Button("Run Archive Pass", variant="secondary")
-            archive_output = gr.Textbox(label="Result", interactive=False)
-        archive_btn.click(fn=run_archive, outputs=archive_output)
+        with gr.Tab("Maintenance"):
+            with gr.Row():
+                consol_btn = gr.Button("Consolidate", variant="primary", scale=1)
+                decay_btn = gr.Button("Decay", variant="secondary", scale=1)
+                archive_btn = gr.Button("Archive", variant="secondary", scale=1)
+            maint_output = gr.Textbox(label="Result", interactive=False, lines=4)
+            consol_btn.click(fn=run_consolidation, outputs=maint_output)
+            decay_btn.click(fn=run_decay, outputs=maint_output)
+            archive_btn.click(fn=run_archive, outputs=maint_output)
 
-        with gr.Row():
-            resurface_query = gr.Textbox(label="Resurface Query", placeholder="Search cold storage...")
-            resurface_btn = gr.Button("Resurface", variant="secondary")
-        resurface_output = gr.Textbox(label="Result", interactive=False, lines=4)
-        resurface_btn.click(fn=run_resurface, inputs=[resurface_query], outputs=resurface_output)
+            gr.HTML(_RULE)
+            with gr.Row():
+                resurface_query = gr.Textbox(
+                    label="Resurface Query", placeholder="Search cold storage...", scale=5,
+                )
+                resurface_btn = gr.Button("Resurface", variant="secondary", scale=1)
+            resurface_output = gr.Textbox(label="Result", interactive=False, lines=3)
+            resurface_btn.click(fn=run_resurface, inputs=[resurface_query], outputs=resurface_output)
 
-    with gr.Tab("Status"):
-        status_output = gr.Textbox(label="System Status", interactive=False, lines=12)
-        status_btn = gr.Button("Refresh", variant="primary")
-        status_btn.click(fn=get_status, outputs=status_output)
+            gr.HTML(_RULE)
+            gr.Markdown(f"{_S}SEGMENT FEEDBACK</span>")
+            load_seg_btn = gr.Button("Load Response Segments", variant="secondary")
+            sentences_display = gr.Textbox(label="Sentences", interactive=False, lines=6)
+            seg_idx = gr.Slider(minimum=1, maximum=1, step=1, value=1, label="Sentence #", visible=False)
+            selected_sentence = gr.Textbox(label="Selected", interactive=False, lines=2)
+            seg_rating = gr.Slider(minimum=1, maximum=5, step=1, value=3, label="Segment rating")
+            submit_seg_btn = gr.Button("Submit Segment Feedback", variant="primary")
+            seg_output = gr.Textbox(label="Result", interactive=False)
+            load_seg_btn.click(fn=load_segments, inputs=[last_response_state],
+                               outputs=[sentences_display, seg_idx, selected_sentence])
+            seg_idx.change(fn=select_sentence, inputs=[last_response_state, seg_idx],
+                           outputs=[selected_sentence])
+            submit_seg_btn.click(fn=submit_segment_feedback,
+                                 inputs=[last_response_state, seg_idx, seg_rating],
+                                 outputs=[seg_output])
 
-    with gr.Tab("Upload"):
-        gr.Markdown("### Document Upload")
-        gr.Markdown(
-            "Store a text or markdown file as semantic memories. "
-            "Each chunk is embedded and stored independently with the source label as a tag."
-        )
-        upload_file = gr.File(label="File (.json, .txt, or .md)", file_types=[".json", ".txt", ".md"])
-        with gr.Row():
-            source_label_input = gr.Textbox(
-                label="Source label",
-                placeholder="e.g. Fields of Fire Rulebook",
-                scale=4,
-            )
-            chunk_mode = gr.Radio(
-                choices=["Paragraph", "Line"],
-                value="Paragraph",
-                label="Chunk by",
-                scale=2,
-            )
-        upload_btn = gr.Button("Upload & Store", variant="primary")
-        upload_output = gr.Textbox(label="Result", interactive=False, lines=3)
-        upload_btn.click(
-            fn=upload_document,
-            inputs=[upload_file, source_label_input, chunk_mode],
-            outputs=upload_output,
-        )
+            gr.HTML(_RULE)
+            gr.Markdown(f"{_S}STANDALONE CORRECTIONS</span>")
+            with gr.Row():
+                standalone_corr_type = gr.Dropdown(
+                    choices=_ALL_CORRECTION_CHOICES, value="Freetext",
+                    label="Type", scale=2,
+                )
+                standalone_corr_content = gr.Textbox(label="Content", scale=4)
+            standalone_corr_btn = gr.Button("Apply", variant="primary")
+            standalone_corr_output = gr.Textbox(label="Result", interactive=False)
+            standalone_corr_btn.click(fn=apply_correction,
+                                      inputs=[standalone_corr_type, standalone_corr_content],
+                                      outputs=standalone_corr_output)
 
-    with gr.Tab("Export"):
-        gr.Markdown("### Session Report")
-        gr.Markdown(
-            "Generates a markdown report at `data/exports/` containing interaction logs, "
-            "memory stats, active directives, and logit bias suppressions."
-        )
-        export_btn = gr.Button("Export Session Report", variant="primary")
-        export_output = gr.Textbox(label="Result", interactive=False, lines=4)
-        export_btn.click(fn=export_session_report, outputs=export_output)
+            gr.HTML(_RULE)
+            gr.Markdown(f"{_S}ADAPTATION EVIDENCE</span>")
+            with gr.Row():
+                adapt_type = gr.Dropdown(choices=["help", "harm"], value="help", label="Event", scale=1)
+                adapt_desc = gr.Textbox(label="Description", scale=4)
+            adapt_btn = gr.Button("Log Event", variant="secondary")
+            adapt_output = gr.Textbox(label="Result", interactive=False)
+            adapt_btn.click(fn=log_adaptation_event, inputs=[adapt_type, adapt_desc], outputs=adapt_output)
 
-    # ── Chat event handlers ───────────────────────────────────────────────────
-    # Wired here (after all tab components) because the outputs include
-    # Feedback tab components: sentences_display, seg_idx, selected_sentence,
-    # seg_rating, seg_corr_content — which aren't defined until that tab block.
-    _chat_outputs = [
-        msg, chatbox, last_response_state,
-        sentences_display, seg_idx, selected_sentence, seg_rating,
-        rating, correction_type, correction_content, target_query,
-    ]
+        with gr.Tab("Status"):
+            status_output = gr.Textbox(label="System Status", interactive=False, lines=12)
+            status_btn = gr.Button("Refresh", variant="primary")
+            status_btn.click(fn=get_status, outputs=status_output)
+
+        with gr.Tab("Upload"):
+            upload_file = gr.File(label="File (.json, .txt, or .md)", file_types=[".json", ".txt", ".md"])
+            with gr.Row():
+                source_label_input = gr.Textbox(label="Source label", placeholder="e.g. Fields of Fire Rulebook", scale=4)
+                chunk_mode = gr.Radio(choices=["Paragraph", "Line"], value="Paragraph", label="Chunk by", scale=2)
+            upload_btn = gr.Button("Upload & Store", variant="primary")
+            upload_output = gr.Textbox(label="Result", interactive=False, lines=2)
+            upload_btn.click(fn=upload_document, inputs=[upload_file, source_label_input, chunk_mode],
+                             outputs=upload_output)
+
+        with gr.Tab("Export"):
+            export_btn = gr.Button("Export Session Report", variant="primary")
+            export_output = gr.Textbox(label="Result", interactive=False, lines=3)
+            export_btn.click(fn=export_session_report, outputs=export_output)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  EVENT WIRING
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Chat: 7 outputs
+    _chat_outputs = [msg, chatbox, last_response_state, rating, correction_type, correction_content, qs_display]
     send_btn.click(fn=chat, inputs=[msg, chatbox], outputs=_chat_outputs)
     msg.submit(fn=chat, inputs=[msg, chatbox], outputs=_chat_outputs)
+
+    # Feedback: 2 outputs
+    fb_btn.click(fn=give_feedback_main,
+                 inputs=[rating, correction_type, correction_content],
+                 outputs=[fb_output, qs_display])
+
+    # Test Runner: 8 outputs
+    tr_load_btn.click(fn=load_test_prompts, outputs=[tr_progress, tr_notes])
+
+    _tr_outputs = [chatbox, last_response_state, tr_progress, tr_notes,
+                   rating, correction_type, correction_content, qs_display]
+    tr_next_btn.click(fn=run_next_test_prompt, outputs=_tr_outputs)
+    _tr_all_event = tr_all_btn.click(fn=run_all_test_prompts, outputs=_tr_outputs)
+    tr_stop_btn.click(fn=stop_test_run, outputs=[tr_progress], cancels=[_tr_all_event])
 
 
 app.launch(server_name="0.0.0.0", server_port=7880, share=False)

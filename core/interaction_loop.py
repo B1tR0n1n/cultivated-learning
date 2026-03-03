@@ -1,6 +1,8 @@
+import re
 import time
 import json
 import uuid
+import numpy as np
 from core.memory_store import MemoryUnit, MemoryType
 from core.reflection import ReflectionEngine
 from evaluation.metrics import EvaluationMetrics
@@ -37,6 +39,9 @@ class InteractionLoop:
         self.bias_builder = bias_builder
         self.last_interaction_id = None
         self.last_response = ""
+        self._last_retrieved = []
+        self._last_log_path = None
+        self._last_verify_status = "PASS"
 
         if self.reflect_enabled:
             self.reflection_engine = ReflectionEngine(engine, memory_store)
@@ -76,28 +81,55 @@ class InteractionLoop:
         if len(self.history) > 20:
             self.history = self.history[-20:]
 
+        # Retrieve memories for this interaction (used by hallucination filter + tracking)
+        retrieved = self.memory.retrieve(user_message, top_k=10)
+        self._last_retrieved = [{"id": m.id, "content": m.content} for m in retrieved]
+
         user_lower = user_message.lower()
         is_speculative = any(trigger in user_lower for trigger in _FABRICATION_TRIGGERS)
+
+        # Hallucination pre-filter: check response claims against source material
+        is_unverified = False
+        if not is_speculative and retrieved:
+            reference_text = user_message + "\n" + "\n".join(m.content for m in retrieved)
+            ref_lower = reference_text.lower()
+
+            claims = self._extract_claims(response)
+            if claims:
+                unmatched = sum(1 for c in claims if c not in ref_lower)
+                if unmatched / len(claims) > 0.3:
+                    is_unverified = True
+
+        if is_speculative:
+            salience = 0.2
+            tags = ["interaction", "speculative"]
+        elif is_unverified:
+            salience = 0.3
+            tags = ["interaction", "unverified"]
+        else:
+            salience = 0.5
+            tags = ["interaction"]
+
         episodic = MemoryUnit(
             content=f"User: {user_message}\nAssistant: {response[:200]}",
             memory_type=MemoryType.EPISODIC,
             source_interaction_id=interaction_id,
-            salience_score=0.2 if is_speculative else 0.5,
-            tags=["interaction"] + (["speculative"] if is_speculative else []),
+            salience_score=salience,
+            tags=tags,
         )
-        if is_speculative:
-            print(f"  Fabrication detected: episodic stored as speculative (salience=0.2)")
         self.memory.store(episodic)
 
         reflection_calls = 0
-        if self.reflection_engine and self.interaction_count % 3 == 0:
+        reflection_throttled = False
+        if self.reflection_engine:
             try:
                 reflections = self.reflection_engine.reflect(
-                    user_message, response, interaction_id
+                    user_message, response, interaction_id,
+                    interaction_count=self.interaction_count,
                 )
                 if reflections:
                     reflection_calls = len(reflections)
-                    print(f"  Reflection: {reflection_calls} new memories generated")
+                reflection_throttled = (self.interaction_count % 3 != 0)
             except Exception as e:
                 print(f"  Reflection error (non-fatal): {e}")
 
@@ -117,17 +149,39 @@ class InteractionLoop:
             if directives is not None:
                 self.metrics.snapshot_directives(
                     interaction_count=self.interaction_count,
-                    directives=directives,
+                    directives=[d.content for d in directives],
                 )
 
         if self.log_dir:
-            self._log(interaction_id, user_message, response, prompt, elapsed)
+            self._log(interaction_id, user_message, response, prompt, elapsed,
+                      directives=directives)
+
+        # Console summary
+        directive_count = 0
+        if self.reflection_engine:
+            directive_count, _ = self.reflection_engine.get_directive_count()
+        verify_status = "SPECULATIVE" if is_speculative else ("UNVERIFIED" if is_unverified else "PASS")
+        self._last_verify_status = verify_status
+        if reflection_throttled:
+            refl_desc = f"depth 0 only (throttled) | {reflection_calls} new memor{'y' if reflection_calls == 1 else 'ies'}"
+        elif self.reflection_engine:
+            refl_desc = f"full pass | {reflection_calls} new memor{'y' if reflection_calls == 1 else 'ies'}"
+        else:
+            refl_desc = "disabled"
+        print(f"\u2500\u2500 Interaction {self.interaction_count} " + "\u2500" * max(0, 46 - len(str(self.interaction_count))))
+        print(f"  User:       {user_message[:60]}{'...' if len(user_message) > 60 else ''}")
+        print(f"  Response:   {response[:80]}{'...' if len(response) > 80 else ''}")
+        print(f"  Retrieved:  {len(retrieved)} memories | Total: {self.memory.collection.count()} | Directives: {directive_count}")
+        print(f"  Reflection: {refl_desc}")
+        print(f"  Verify:     {verify_status}")
+        print(f"  Time:       {elapsed:.2f}s")
+        print("\u2500" * 48)
 
         return response
 
     def feedback(self, rating, correction=None, target_query=None):
         """Process explicit feedback.
-        
+
         Args:
             rating: 1-5 scale
             correction: Optional correction text
@@ -149,7 +203,16 @@ class InteractionLoop:
         for mem in recent:
             self.memory.adjust_salience(mem.id, delta)
 
+        # Tag last-retrieved memories for passive retrieval precision tracking
+        if self._last_retrieved:
+            tag = "confirmed_relevant" if rating >= 4 else ("flagged_irrelevant" if rating <= 2 else None)
+            if tag:
+                for entry in self._last_retrieved:
+                    self._append_tag(entry["id"], tag)
+
         # Store correction as high-salience semantic memory
+        killed_directives = []
+        superseded_count = 0
         if correction:
             correction_mem = MemoryUnit(
                 content=f"CORRECTION: {correction}",
@@ -157,15 +220,13 @@ class InteractionLoop:
                 salience_score=0.9,
                 confidence=1.0,
                 tags=["user_correction", "high_priority"],
+                origin="human",
             )
             self.memory.store(correction_mem)
-            print(f"Stored correction: {correction}")
 
             # Kill contradicting directives
             if self.reflection_engine:
-                killed = self.reflection_engine.check_correction_conflicts(correction)
-                if killed:
-                    print(f"  Correction killed {len(killed)} conflicting directive(s)")
+                killed_directives = self.reflection_engine.check_correction_conflicts(correction)
 
             # Supersede contradicting memories
             superseded = self.memory.supersede_by_correction(
@@ -173,11 +234,36 @@ class InteractionLoop:
                 correction_id=correction_mem.id,
                 similarity_threshold=0.45,
             )
-            if superseded:
-                print(f"  Correction superseded {len(superseded)} contradicting memories")
+            superseded_count = len(superseded) if superseded else 0
 
-        print(f"Feedback recorded: rating={rating}, target='{target_query[:50]}...', "
-              f"adjusted {len(recent)} memories by {delta:+.2f}")
+            # Auto-supersede system directives that conflict with this correction
+            if self.engine is not None:
+                correction_emb = self.engine.get_embedding(correction_mem.content)
+                procedural = self.memory.retrieve_by_type(MemoryType.PROCEDURAL)
+                system_directives = [m for m in procedural if m.origin == "system"]
+                for sd in system_directives:
+                    sd_emb = self.engine.get_embedding(sd.content)
+                    similarity = float(np.dot(correction_emb, sd_emb))
+                    if similarity > 0.50:
+                        self.memory.supersede(sd.id, correction_mem.id)
+                        killed_directives.append(sd.content)
+                        superseded_count += 1
+
+        # Update JSON log for last interaction
+        if self._last_log_path:
+            self._update_log_rating(rating, correction)
+
+        # Console summary
+        correction_trunc = None
+        if correction:
+            correction_trunc = correction[:50] + ("..." if len(correction) > 50 else "")
+        print(f"\u2500\u2500 Feedback " + "\u2500" * 39)
+        print(f"  Rating:      {rating} ({delta:+.2f} to {len(recent)} memories)")
+        print(f"  Correction:  {correction_trunc or 'None'}")
+        print(f"  Superseded:  {superseded_count} system directives")
+        for kd in killed_directives:
+            print(f'    killed: "{kd[:60]}..."')
+        print("\u2500" * 48)
 
     def score_retrieval(self, relevance_scores):
         if not self.metrics:
@@ -257,9 +343,96 @@ class InteractionLoop:
         with open(path, "w") as f:
             json.dump(entry, f, indent=2)
 
-    def _log(self, interaction_id, user_message, response, prompt, elapsed):
+    def _append_tag(self, memory_id, tag):
+        """Append a tag to an existing memory's tag list in ChromaDB."""
+        results = self.memory.collection.get(ids=[memory_id])
+        if not results["ids"]:
+            return
+        metadata = results["metadatas"][0]
+        tags = json.loads(metadata.get("tags", "[]"))
+        if tag not in tags:
+            tags.append(tag)
+            metadata["tags"] = json.dumps(tags)
+            self.memory.collection.update(ids=[memory_id], metadatas=[metadata])
+
+    def _update_log_rating(self, rating, correction=None):
+        """Update the most recent JSON log file with feedback data."""
+        import os
+        if not self._last_log_path or not os.path.exists(self._last_log_path):
+            return
+        with open(self._last_log_path, "r") as f:
+            entry = json.load(f)
+        entry["rating"] = rating
+        if correction:
+            entry.setdefault("corrections", []).append({
+                "type": "user_correction",
+                "content": correction,
+            })
+        with open(self._last_log_path, "w") as f:
+            json.dump(entry, f, indent=2)
+
+    def get_retrieval_stats(self):
+        """Count memories tagged as relevant vs irrelevant through passive feedback.
+
+        Returns dict with total_tagged, confirmed_relevant, flagged_irrelevant,
+        and precision ratio (relevant / total_tagged, or None if no data).
+        """
+        all_data = self.memory.collection.get(include=["metadatas"])
+        relevant = 0
+        irrelevant = 0
+        for metadata in all_data["metadatas"]:
+            tags = json.loads(metadata.get("tags", "[]"))
+            if "confirmed_relevant" in tags:
+                relevant += 1
+            if "flagged_irrelevant" in tags:
+                irrelevant += 1
+        total = relevant + irrelevant
+        return {
+            "total_tagged": total,
+            "confirmed_relevant": relevant,
+            "flagged_irrelevant": irrelevant,
+            "precision": relevant / total if total > 0 else None,
+        }
+
+    @staticmethod
+    def _extract_claims(text):
+        """Extract verifiable claims from text using simple heuristics.
+
+        Targets: multi-word capitalized sequences (proper nouns / named entities),
+        numbers that are specific enough to matter (3+ digits, decimals, percentages),
+        and quoted statements (5+ chars).  Returns a set of lowercase strings.
+        """
+        claims = set()
+        # Multi-word capitalized sequences (e.g. "New York", "Albert Einstein")
+        for m in re.finditer(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+', text):
+            claims.add(m.group().lower())
+        # Specific numbers: 3+ digits, decimals, or percentages
+        for m in re.finditer(r'\b\d{3,}(?:[.,]\d+)*\b|\b\d+\.\d+\b|\b\d+%', text):
+            claims.add(m.group())
+        # Quoted statements (5+ chars inside quotes)
+        for m in re.finditer(r'"([^"]{5,})"', text):
+            claims.add(m.group(1).lower())
+        return claims
+
+    def _log(self, interaction_id, user_message, response, prompt, elapsed,
+             directives=None):
         import os
         os.makedirs(self.log_dir, exist_ok=True)
+
+        # Cumulative session metrics
+        procedural = self.memory.retrieve_by_type(MemoryType.PROCEDURAL)
+        human_procedural = sum(1 for m in procedural if m.origin == "human")
+        system_procedural = sum(1 for m in procedural if m.origin == "system")
+
+        stats = self.memory.get_stats()
+        avg_salience = stats.get("avg_salience", 0.0)
+
+        directive_snapshot = []
+        if directives:
+            directive_snapshot = [
+                {"content": d.content, "origin": d.origin} for d in directives
+            ]
+
         log_entry = {
             "id": interaction_id,
             "timestamp": time.time(),
@@ -269,6 +442,10 @@ class InteractionLoop:
             "response_tokens": self.engine.count_tokens(response),
             "elapsed_seconds": round(elapsed, 2),
             "memory_count": self.memory.collection.count(),
+            "procedural_human": human_procedural,
+            "procedural_system": system_procedural,
+            "avg_salience": round(avg_salience, 4),
+            "directives": directive_snapshot,
             "rating": None,
             "corrections": [],
             "segment_ratings": [],
@@ -276,3 +453,4 @@ class InteractionLoop:
         path = os.path.join(self.log_dir, f"{interaction_id}.json")
         with open(path, "w") as f:
             json.dump(log_entry, f, indent=2)
+        self._last_log_path = path

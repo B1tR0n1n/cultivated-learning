@@ -28,6 +28,7 @@ class MemoryUnit:
     confidence: float = 0.7
     superseded_by: Optional[str] = None
     tags: List[str] = field(default_factory=list)
+    origin: str = "system"
 
     def to_metadata(self):
         return {
@@ -40,6 +41,7 @@ class MemoryUnit:
             "confidence": self.confidence,
             "superseded_by": self.superseded_by or "",
             "tags": json.dumps(self.tags),
+            "origin": self.origin,
         }
 
     @staticmethod
@@ -56,6 +58,7 @@ class MemoryUnit:
             confidence=metadata["confidence"],
             superseded_by=metadata.get("superseded_by", "") or None,
             tags=json.loads(metadata.get("tags", "[]")),
+            origin=metadata.get("origin", "system"),
         )
 
 

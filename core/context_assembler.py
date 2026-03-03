@@ -43,28 +43,43 @@ class ContextAssembler:
         user_tokens = self.engine.count_tokens(user_section)
         token_budget -= user_tokens
 
-        # 3. Directives (high priority, up to 10% of budget)
+        # 3. Directives — split by origin
+        #    Human-origin: guaranteed 6% of budget, never truncated
+        #    System-origin: up to 4% of budget, truncated if over
         directive_section = ""
         if directives:
-            directive_text = "\n".join(f"- {d}" for d in directives)
-            directive_section = f"\n\nActive directives:\n{directive_text}"
-            directive_tokens = self.engine.count_tokens(directive_section)
-            if directive_tokens < token_budget * 0.1:
-                token_budget -= directive_tokens
-            else:
-                trimmed = []
-                used = 0
-                for d in directives:
-                    line = f"- {d}"
-                    lt = self.engine.count_tokens(line)
-                    if used + lt < token_budget * 0.1:
-                        trimmed.append(line)
-                        used += lt
-                if trimmed:
-                    directive_section = "\n\nActive directives:\n" + "\n".join(trimmed)
-                    token_budget -= used
-                else:
-                    directive_section = ""
+            human_budget = token_budget * 0.06
+            system_budget = token_budget * 0.04
+
+            human_dirs = [d for d in directives if d.origin == "human"]
+            system_dirs = [d for d in directives if d.origin != "human"]
+
+            # Human directives — always included (guaranteed budget)
+            human_lines = [f"- {d.content}" for d in human_dirs]
+            human_text = ""
+            human_tokens = 0
+            if human_lines:
+                human_text = "\n\nUser directives:\n" + "\n".join(human_lines)
+                human_tokens = self.engine.count_tokens(human_text)
+
+            # System directives — truncate if over budget
+            system_lines = []
+            system_tokens = 0
+            for d in system_dirs:
+                line = f"- {d.content}"
+                lt = self.engine.count_tokens(line)
+                if system_tokens + lt > system_budget:
+                    break
+                system_lines.append(line)
+                system_tokens += lt
+
+            system_text = ""
+            if system_lines:
+                system_text = "\n\nSystem directives:\n" + "\n".join(system_lines)
+                system_tokens = self.engine.count_tokens(system_text)
+
+            directive_section = human_text + system_text
+            token_budget -= (human_tokens + system_tokens)
 
         # 4. Retrieved memories (up to 30% of remaining budget)
         memory_budget = int(token_budget * 0.3)

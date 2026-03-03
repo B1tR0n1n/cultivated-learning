@@ -135,15 +135,20 @@ class ReflectionEngine:
         print(f"Reflection engine loaded {len(self.directives)}/{self.max_directives} directives "
               f"({len(procedural) - len(kept)} purged on startup).")
 
-    def reflect(self, user_message, assistant_response, interaction_id):
-        """Run reflection pass at all depths. Returns list of new memories created.
+    def reflect(self, user_message, assistant_response, interaction_id,
+                interaction_count):
+        """Run reflection pass. Returns list of new memories created.
 
-        Depths 0 and 1 are batched into a single model call. Depth 2 and 3
-        run sequentially as before (each depends on prior results).
+        Frequency throttle:
+        - Depth 0 (factual analysis) runs every interaction.
+        - Depths 1, 2, 3 only run when interaction_count % 3 == 0.
+        This reduces LLM calls from 4 per interaction to ~1.7 on average
+        and slows reflective memory accumulation by ~60%.
         """
         new_memories = []
+        full_pass = (interaction_count % 3 == 0)
 
-        # --- Build prompts for depth 0 and depth 1 ---
+        # --- Depth 0: always runs ---
         prompt_d0 = (
             "[INST] You are a self-reflection module analyzing an interaction.\n\n"
             f"Interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
@@ -154,54 +159,69 @@ class ReflectionEngine:
             "Be brief and specific. One paragraph. [/INST]"
         )
 
-        recent = self.memory.retrieve(user_message, top_k=5)
-        prompt_d1 = None
-        if len(recent) >= 2:
-            memory_context = "\n".join(
-                [f"- [{m.memory_type.value}] {m.content[:150]}" for m in recent]
-            )
-            prompt_d1 = (
-                "[INST] You are a self-reflection module analyzing patterns.\n\n"
-                f"Current interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
-                f"Recent memories:\n{memory_context}\n\n"
-                "What patterns do you notice?\n"
-                "- Recurring user needs or preferences\n"
-                "- Consistent strengths or weaknesses in responses\n"
-                "- Emerging themes across interactions\n\n"
-                "Be brief and specific. One paragraph. [/INST]"
-            )
-
-        # --- Batch generate d0 (and d1 if applicable) ---
-        prompts = [prompt_d0] + ([prompt_d1] if prompt_d1 else [])
-        results = self.engine.generate_batch(prompts, max_new_tokens=200, temperature=0.3)
-
-        d0 = MemoryUnit(
-            content=f"Reflection D0: {results[0]}",
-            memory_type=MemoryType.REFLECTIVE,
-            salience_score=0.2, confidence=0.6,
-            tags=["reflection", "depth_0", "factual"],
-        )
-        new_memories.append(d0)
-
+        # --- Depth 1: only on full pass ---
         d1 = None
-        if prompt_d1:
-            d1 = MemoryUnit(
-                content=f"Reflection D1: {results[1]}",
+        if full_pass:
+            recent = self.memory.retrieve(user_message, top_k=5)
+            prompt_d1 = None
+            if len(recent) >= 2:
+                memory_context = "\n".join(
+                    [f"- [{m.memory_type.value}] {m.content[:150]}" for m in recent]
+                )
+                prompt_d1 = (
+                    "[INST] You are a self-reflection module analyzing patterns.\n\n"
+                    f"Current interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
+                    f"Recent memories:\n{memory_context}\n\n"
+                    "What patterns do you notice?\n"
+                    "- Recurring user needs or preferences\n"
+                    "- Consistent strengths or weaknesses in responses\n"
+                    "- Emerging themes across interactions\n\n"
+                    "Be brief and specific. One paragraph. [/INST]"
+                )
+
+            # Batch d0 + d1 together when both run
+            prompts = [prompt_d0] + ([prompt_d1] if prompt_d1 else [])
+            results = self.engine.generate_batch(prompts, max_new_tokens=200, temperature=0.3)
+
+            d0 = MemoryUnit(
+                content=f"Reflection D0: {results[0]}",
                 memory_type=MemoryType.REFLECTIVE,
-                salience_score=0.3, confidence=0.5,
-                tags=["reflection", "depth_1", "analytical"],
+                salience_score=0.2, confidence=0.6,
+                tags=["reflection", "depth_0", "factual"],
             )
-            new_memories.append(d1)
+            new_memories.append(d0)
 
-        # --- Depth 2 and 3 sequentially ---
-        d2 = self._depth_2(d0, d1)
-        if d2:
-            new_memories.append(d2)
+            if prompt_d1:
+                d1 = MemoryUnit(
+                    content=f"Reflection D1: {results[1]}",
+                    memory_type=MemoryType.REFLECTIVE,
+                    salience_score=0.3, confidence=0.5,
+                    tags=["reflection", "depth_1", "analytical"],
+                )
+                new_memories.append(d1)
+        else:
+            # Throttled: depth 0 only
+            results = self.engine.generate_batch([prompt_d0], max_new_tokens=200, temperature=0.3)
+            d0 = MemoryUnit(
+                content=f"Reflection D0: {results[0]}",
+                memory_type=MemoryType.REFLECTIVE,
+                salience_score=0.2, confidence=0.6,
+                tags=["reflection", "depth_0", "factual"],
+            )
+            new_memories.append(d0)
+            next_full = interaction_count + (3 - interaction_count % 3)
+            print(f"  Reflection: depth 0 only (throttled, next full pass at interaction {next_full})")
 
-        if len(self.directives) >= 2:
-            d3 = self._depth_3()
-            if d3:
-                new_memories.append(d3)
+        # --- Depths 2 and 3: only on full pass ---
+        if full_pass:
+            d2 = self._depth_2(d0, d1)
+            if d2:
+                new_memories.append(d2)
+
+            if len(self.directives) >= 2:
+                d3 = self._depth_3()
+                if d3:
+                    new_memories.append(d3)
 
         for mem in new_memories:
             mem.source_interaction_id = interaction_id
@@ -510,8 +530,21 @@ class ReflectionEngine:
             print(f"  Auto-prune parse failed (non-fatal): {e}")
 
     def get_directives(self):
-        """Return current active directives for context assembly."""
-        return self.directives.copy()
+        """Return active directives as MemoryUnit objects.
+
+        Batch-fetches from ChromaDB so origin and other metadata are available.
+        """
+        if not self.directive_ids:
+            return []
+        results = self.memory.collection.get(ids=self.directive_ids)
+        units = []
+        for i, mid in enumerate(results["ids"]):
+            units.append(MemoryUnit.from_chroma(
+                id=mid,
+                document=results["documents"][i],
+                metadata=results["metadatas"][i],
+            ))
+        return units
 
     def get_directive_count(self):
         """Return current and max directive counts."""

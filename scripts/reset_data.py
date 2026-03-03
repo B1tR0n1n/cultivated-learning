@@ -5,14 +5,14 @@ interaction log files. Does NOT delete the database, collection, or
 any source code or model files.
 
 Run from inside the container:
-    python /workspace/Projects/cultivated-learning/scripts/reset_data.py
+    python /workspace/Projects/cultivated-learning-24b/scripts/reset_data.py
 """
 import os
 import json
 import glob
 import chromadb
 
-BASE_DIR = os.environ.get("CL_BASE_DIR", "/workspace/Projects/cultivated-learning")
+BASE_DIR = os.environ.get("CL_BASE_DIR", "/workspace/Projects/cultivated-learning-24b")
 
 MEMORY_DB   = os.path.join(BASE_DIR, "data/memory_db")
 COLD_ARCHIVE = os.path.join(BASE_DIR, "data/cold_storage/cold_archive.json")

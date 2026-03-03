@@ -1,5 +1,9 @@
-data/
+data/*
+!data/test_prompts_100.json
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 notebooks/scratch.ipynb
+.claude/
+CLAUDE.md
+CLAUD.MD/
