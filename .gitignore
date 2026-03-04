@@ -5,3 +5,5 @@ __pycache__/
 notebooks/scratch.ipynb
 shell-native/data/
 .claude/
+sable_system_prompt.txt
+CLAUDE.md
