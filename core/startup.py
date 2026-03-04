@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(0, "/workspace/Projects/cultivated-learning-24b")
+sys.path.insert(0, "/workspace/Projects/cultivated-learning")
 
 from engine.inference import InferenceEngine
 from core.memory_store import MemoryStore
@@ -10,10 +10,13 @@ from core.cold_storage import ColdStorage
 from evaluation.metrics import EvaluationMetrics
 
 def init():
-    engine = InferenceEngine()  # defaults to Mistral-Small-24B-Instruct-2501-AWQ
+    engine = InferenceEngine(
+        "/workspace/models/results/Mistral-7B-Instruct-v0.3",
+        adapter_path="/workspace/models/results/shell-native-combined"
+    )
     engine.load()
     memory = MemoryStore(
-        persist_dir="/workspace/Projects/cultivated-learning-24b/data/memory_db",
+        persist_dir="/workspace/Projects/cultivated-learning/data/memory_db",
         engine=engine
     )
     return engine, memory
@@ -30,7 +33,7 @@ def init_full():
     )
 
     metrics = EvaluationMetrics(
-        log_dir="/workspace/Projects/cultivated-learning-24b/data/evaluation",
+        log_dir="/workspace/Projects/cultivated-learning/data/evaluation",
         memory_store=memory
     )
 
@@ -38,8 +41,8 @@ def init_full():
         engine=engine,
         memory_store=memory,
         assembler=assembler,
-        log_dir="/workspace/Projects/cultivated-learning-24b/data/interaction_log",
-        metrics_dir="/workspace/Projects/cultivated-learning-24b/data/evaluation",
+        log_dir="/workspace/Projects/cultivated-learning/data/interaction_log",
+        metrics_dir="/workspace/Projects/cultivated-learning/data/evaluation",
     )
 
     consolidator = ConsolidationEngine(engine, memory)
@@ -47,7 +50,7 @@ def init_full():
     cold = ColdStorage(
         engine=engine,
         memory_store=memory,
-        archive_dir="/workspace/Projects/cultivated-learning-24b/data/cold_storage"
+        archive_dir="/workspace/Projects/cultivated-learning/data/cold_storage"
     )
 
     print(f"\n{'='*50}")

@@ -52,10 +52,12 @@ class InferenceEngine:
 
     def __init__(self, model_path="/workspace/models/results/Mistral-Small-24B-Instruct-2501-AWQ",
                  max_context=4096,
-                 embedding_model_path="/workspace/models/results/all-MiniLM-L6-v2"):
+                 embedding_model_path="/workspace/models/results/all-MiniLM-L6-v2",
+                 adapter_path=None):
         self.model_path = model_path
         self.max_context = max_context
         self.embedding_model_path = embedding_model_path
+        self.adapter_path = adapter_path
         self.model = None
         self.tokenizer = None
         self.device = None
@@ -83,6 +85,12 @@ class InferenceEngine:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.device = self.model.device
 
+        # Load LoRA adapter if specified
+        if self.adapter_path:
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, self.adapter_path)
+            print(f"Loaded LoRA adapter: {self.adapter_path}", flush=True)
+
         # Detect prompt format from model architecture
         layers = self.model.config.num_hidden_layers
         self._prompt_format = "mistral-small" if layers == 40 else "mistral-v03"
@@ -93,12 +101,12 @@ class InferenceEngine:
         )
 
         vram = torch.cuda.memory_allocated(0) / 1e9
-        print(f"Loaded {self.model_path}")
-        print(f"Loaded embedding model: {self.embedding_model_path}")
-        print(f"  VRAM: {vram:.2f} GB")
-        print(f"  Embedding dim: {self.embedding_model.get_sentence_embedding_dimension()}")
-        print(f"  Max context: {self.max_context} tokens")
-        print(f"  Prompt format: {self._prompt_format} ({layers} layers)")
+        print(f"Loaded {self.model_path}", flush=True)
+        print(f"Loaded embedding model: {self.embedding_model_path}", flush=True)
+        print(f"  VRAM: {vram:.2f} GB", flush=True)
+        print(f"  Embedding dim: {self.embedding_model.get_sentence_embedding_dimension()}", flush=True)
+        print(f"  Max context: {self.max_context} tokens", flush=True)
+        print(f"  Prompt format: {self._prompt_format} ({layers} layers)", flush=True)
         return self
     
     def count_tokens(self, text):
