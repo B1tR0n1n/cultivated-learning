@@ -1,9 +1,9 @@
 import sys
 import os
 
-# FIX: Use environment variables with sensible defaults instead of hardcoded paths
-BASE_DIR = os.environ.get("CL_BASE_DIR", "/workspace/Projects/cultivated-learning")
-MODEL_PATH = os.environ.get("CL_MODEL_PATH", "/workspace/models/results/Mistral-7B-Instruct-v0.3")
+# Use environment variables with sensible defaults for the 24B fork
+BASE_DIR = os.environ.get("CL_BASE_DIR", "/workspace/Projects/cultivated-learning-24b")
+MODEL_PATH = os.environ.get("CL_MODEL_PATH", "/workspace/models/results/Mistral-Small-24B-Instruct-2501-AWQ")
 
 sys.path.insert(0, BASE_DIR)
 
@@ -30,7 +30,9 @@ memory = MemoryStore(
 assembler = ContextAssembler(
     engine=engine,
     memory_store=memory,
+    max_context=engine.max_context,
     system_prompt_path=os.path.join(BASE_DIR, "sable_system_prompt.txt"),
+    prompt_format=engine.prompt_format,
 )
 
 metrics = EvaluationMetrics(

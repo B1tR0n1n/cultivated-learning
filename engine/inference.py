@@ -41,12 +41,17 @@ class LogitBiasProcessor(LogitsProcessor):
 
 class InferenceEngine:
     """Wrapper around the base LLM. All model interaction goes through here.
-    
-    v2 changes:
-    - Default max_context raised from 4096 → 16384
+
+    v3 changes (24b fork):
+    - Default model path updated to Mistral-Small-24B-Instruct-2501-AWQ
+    - Default max_context raised to 32768 for 24B context window
+    - prompt_format property: auto-detected from num_hidden_layers after load()
+      - 40 layers → "mistral-small" (Mistral Small 24B format)
+      - other    → "mistral-v03"    (Mistral 7B v0.3 format)
     """
-    
-    def __init__(self, model_path, max_context=16384, 
+
+    def __init__(self, model_path="/workspace/models/results/Mistral-Small-24B-Instruct-2501-AWQ",
+                 max_context=4096,
                  embedding_model_path="/workspace/models/results/all-MiniLM-L6-v2"):
         self.model_path = model_path
         self.max_context = max_context
@@ -57,7 +62,12 @@ class InferenceEngine:
         self.embedding_model = None
         self._flat_biases = {}             # {token_id: bias} for single-token suppressions
         self._sequence_suppressions = []   # [[token_id, ...]] for multi-token phrases
-    
+        self._prompt_format = "mistral-v03"  # overwritten in load()
+
+    @property
+    def prompt_format(self):
+        return self._prompt_format
+
     def load(self):
         # Load Mistral for generation
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -72,18 +82,23 @@ class InferenceEngine:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.device = self.model.device
-        
+
+        # Detect prompt format from model architecture
+        layers = self.model.config.num_hidden_layers
+        self._prompt_format = "mistral-small" if layers == 40 else "mistral-v03"
+
         # Load dedicated embedding model
         self.embedding_model = SentenceTransformer(
             self.embedding_model_path, device=str(self.device)
         )
-        
+
         vram = torch.cuda.memory_allocated(0) / 1e9
         print(f"Loaded {self.model_path}")
         print(f"Loaded embedding model: {self.embedding_model_path}")
         print(f"  VRAM: {vram:.2f} GB")
         print(f"  Embedding dim: {self.embedding_model.get_sentence_embedding_dimension()}")
         print(f"  Max context: {self.max_context} tokens")
+        print(f"  Prompt format: {self._prompt_format} ({layers} layers)")
         return self
     
     def count_tokens(self, text):

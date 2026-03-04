@@ -7,19 +7,22 @@ _FALLBACK_SYSTEM_PROMPT = "You are a helpful assistant with persistent memory."
 class ContextAssembler:
     """Packs memory, history, directives, and user message into a prompt.
 
-    v4 changes:
-    - Sable identity system prompt replaces generic assistant prompt
-    - ~600 tokens fixed cost — justified at 16K context (3.9% of budget)
-    - System prompt loaded from external file (sable_system_prompt.txt)
+    v5 changes (24b fork):
+    - prompt_format parameter selects final string assembly:
+        "mistral-v03"   — wraps everything in [INST]...[/INST] (Mistral 7B v0.3)
+        "mistral-small" — puts system prompt in [SYSTEM_PROMPT]...[/SYSTEM_PROMPT]
+                          and the rest in [INST]...[/INST] (Mistral Small 24B)
+    - Token budget logic unchanged; only the final assembly differs.
     """
 
     def __init__(self, engine, memory_store, max_context=16384, max_response=1024,
-                 system_prompt_path=None):
+                 system_prompt_path=None, prompt_format="mistral-v03"):
         self.engine = engine
         self.memory = memory_store
         self.max_context = max_context
         self.max_response = max_response
         self.available_tokens = max_context - max_response
+        self.prompt_format = prompt_format
 
         if system_prompt_path and os.path.exists(system_prompt_path):
             with open(system_prompt_path, "r") as f:
@@ -100,8 +103,17 @@ class ContextAssembler:
             if history_lines:
                 history_section = "\n\nRecent conversation:\n" + "\n".join(history_lines)
 
-        # Assemble final prompt
-        prompt = system_section + directive_section + memory_section + history_section + user_section
+        # Assemble final prompt — format-specific string layout only
+        if self.prompt_format == "mistral-small":
+            # Mistral Small 24B: system prompt in dedicated tag, conversation in [INST]
+            prompt = (
+                f"[SYSTEM_PROMPT] {self.system_prompt} [/SYSTEM_PROMPT]"
+                f"[INST]{directive_section}{memory_section}{history_section}"
+                f"\nUser: {user_message} [/INST]"
+            )
+        else:
+            # mistral-v03 (default): everything wrapped in a single [INST]...[/INST]
+            prompt = system_section + directive_section + memory_section + history_section + user_section
 
         return prompt
 
