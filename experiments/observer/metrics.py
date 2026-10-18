@@ -79,7 +79,8 @@ def verdict(pairs, components):
     mean_diff = statistics.fmean(diffs) if diffs else float("nan")
     wins = sum(1 for d in diffs if d > 0)
     component_dirs = {
-        name: statistics.fmean(c - t for c, t in values) for name, values in components.items()
+        name: statistics.fmean(c - t for c, t in values) if values else float("nan")
+        for name, values in components.items()
     }
     agreeing = sum(1 for v in component_dirs.values() if v > 0)
     if n and mean_diff >= 0.05 and wins >= n - 1 and agreeing >= 2:

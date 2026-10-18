@@ -1,0 +1,194 @@
+{
+  "runs": 6,
+  "incomplete": [],
+  "arms": {
+    "SELF": {
+      "n": 2,
+      "M1": 0.029531911202647164,
+      "M1_sd": 0.015347514039526597,
+      "lists": 0.03278688524590164,
+      "question": 0.047872340425531915,
+      "length": 0.007936507936507936,
+      "reflective_share": 0.5076046726810086,
+      "reflective_share_range": [
+        0.5075757575757576,
+        0.5076335877862596
+      ],
+      "memories": 263.0,
+      "final_directives": 6.0,
+      "crucial_after_40": 0.0,
+      "important_to_note_after_42": 0.0,
+      "minutes": 6.17
+    },
+    "SELF_PLUS": {
+      "n": 2,
+      "M1": 0.00273224043715847,
+      "M1_sd": 0.00273224043715847,
+      "lists": 0.00819672131147541,
+      "question": 0.0,
+      "length": 0.0,
+      "reflective_share": 0.5057034220532319,
+      "reflective_share_range": [
+        0.5057034220532319,
+        0.5057034220532319
+      ],
+      "memories": 263.0,
+      "final_directives": 6.0,
+      "crucial_after_40": 0.0,
+      "important_to_note_after_42": 0.0,
+      "minutes": 5.435833333333333
+    },
+    "PEER": {
+      "n": 1,
+      "M1": 0.0,
+      "M1_sd": 0.0,
+      "lists": 0.0,
+      "question": 0.0,
+      "length": 0.0,
+      "reflective_share": 0.5076335877862596,
+      "reflective_share_range": [
+        0.5076335877862596,
+        0.5076335877862596
+      ],
+      "memories": 262.0,
+      "final_directives": 5.0,
+      "crucial_after_40": 0.0,
+      "important_to_note_after_42": 0.0,
+      "minutes": 5.245
+    },
+    "OTHER": {
+      "n": 1,
+      "M1": 0.010638297872340425,
+      "M1_sd": 0.0,
+      "lists": 0.0,
+      "question": 0.031914893617021274,
+      "length": 0.0,
+      "reflective_share": 0.5115384615384615,
+      "reflective_share_range": [
+        0.5115384615384615,
+        0.5115384615384615
+      ],
+      "memories": 260.0,
+      "final_directives": 5.0,
+      "crucial_after_40": 0.0,
+      "important_to_note_after_42": 0.0,
+      "minutes": 5.663333333333333
+    }
+  },
+  "comparisons": {
+    "Q1": {
+      "control": "SELF_PLUS",
+      "treatment": "PEER",
+      "label": "primary: outside position, information equal",
+      "n_pairs": 1,
+      "mean_diff": 0.0,
+      "wins": 0,
+      "component_mean_diffs": {
+        "lists": 0.0,
+        "question": 0.0,
+        "length": 0.0
+      },
+      "components_agreeing": 0,
+      "verdict": "FAIL",
+      "seeds": [
+        1
+      ],
+      "pairs": [
+        [
+          0.0,
+          0.0
+        ]
+      ]
+    },
+    "Q2": {
+      "control": "PEER",
+      "treatment": "OTHER",
+      "label": "exploratory: whose mind writes from outside",
+      "n_pairs": 1,
+      "mean_diff": -0.010638297872340425,
+      "wins": 0,
+      "component_mean_diffs": {
+        "lists": 0.0,
+        "question": -0.031914893617021274,
+        "length": 0.0
+      },
+      "components_agreeing": 0,
+      "verdict": "FAIL",
+      "seeds": [
+        1
+      ],
+      "pairs": [
+        [
+          0.0,
+          0.010638297872340425
+        ]
+      ]
+    },
+    "Q3": {
+      "control": "SELF",
+      "treatment": "SELF_PLUS",
+      "label": "exploratory: the observer's evidence given to the self",
+      "n_pairs": 2,
+      "mean_diff": 0.026799670765488694,
+      "wins": 2,
+      "component_mean_diffs": {
+        "lists": 0.02459016393442623,
+        "question": 0.047872340425531915,
+        "length": 0.007936507936507936
+      },
+      "components_agreeing": 3,
+      "verdict": "INCONCLUSIVE",
+      "seeds": [
+        1,
+        2
+      ],
+      "pairs": [
+        [
+          0.014184397163120567,
+          0.0
+        ],
+        [
+          0.04487942524217376,
+          0.00546448087431694
+        ]
+      ]
+    },
+    "Q4": {
+      "control": "SELF",
+      "treatment": "PEER",
+      "label": "exploratory: shipped design vs outside author",
+      "n_pairs": 1,
+      "mean_diff": 0.014184397163120567,
+      "wins": 1,
+      "component_mean_diffs": {
+        "lists": 0.0,
+        "question": 0.0425531914893617,
+        "length": 0.0
+      },
+      "components_agreeing": 1,
+      "verdict": "FAIL",
+      "seeds": [
+        1
+      ],
+      "pairs": [
+        [
+          0.014184397163120567,
+          0.0
+        ]
+      ]
+    }
+  },
+  "Q5": {
+    "arm_means": {
+      "SELF": 0.5076046726810086,
+      "SELF_PLUS": 0.5057034220532319,
+      "PEER": 0.5076335877862596,
+      "OTHER": 0.5115384615384615
+    },
+    "min": 0.5057034220532319,
+    "max": 0.5115384615384615,
+    "max_gap": 0.005835039485229565,
+    "prediction": "every run in [0.40, 0.55] and arm means within 0.05",
+    "holds": true
+  }
+}

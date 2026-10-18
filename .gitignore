@@ -13,3 +13,4 @@ CLAUDE.md
 CLAUD.MD
 backups/
 .venv/
+.coverage
