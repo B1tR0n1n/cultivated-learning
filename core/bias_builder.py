@@ -1,6 +1,6 @@
 import re
-from core.memory_store import MemoryType
 
+from core.memory_store import MemoryType
 
 # Static phrases to suppress unconditionally — common instruct-isms that
 # Mistral-Instruct produces even when the system prompt tells it not to.
@@ -42,6 +42,33 @@ _STRUCTURED_PREFIXES = {
 }
 
 
+_QUOTES = "\"'\u2018\u2019\u201c\u201d"
+
+
+def _clean_target(target):
+    """Strip whitespace, surrounding quotes and trailing punctuation from a target."""
+    return target.strip().strip(_QUOTES).strip().rstrip(".!").strip().strip(_QUOTES).strip()
+
+
+def _target_variants(target):
+    """The forms a phrase takes in generated text.
+
+    Mid-sentence the model writes a word with its leading space (" crucial"),
+    which is a different token from "crucial" at the start of a line, and a
+    sentence start capitalises it. Suppressing only the bare form leaves the
+    common case untouched.
+    """
+    clean = _clean_target(target)
+    if not clean:
+        return []
+    capital = clean[0].upper() + clean[1:]
+    variants = []
+    for form in (clean, " " + clean, capital, " " + capital):
+        if form not in variants:
+            variants.append(form)
+    return variants
+
+
 class BiasBuilder:
     """Builds a logit bias map from static suppressions and user corrections.
 
@@ -69,7 +96,7 @@ class BiasBuilder:
             (flat_biases, sequence_suppressions) — see InferenceEngine.suppress_tokens()
         """
         phrases = list(BASE_SUPPRESSIONS)
-        seen = {p.lower() for p in phrases}
+        seen = set(phrases)
 
         mems = self.memory.retrieve_by_type(MemoryType.SEMANTIC, limit=100)
 
@@ -78,9 +105,7 @@ class BiasBuilder:
             for tag, prefixes in _STRUCTURED_PREFIXES.items():
                 if tag in mem.tags:
                     target = self._extract_from_structured(mem.content, prefixes)
-                    if target and target.lower() not in seen:
-                        phrases.append(target)
-                        seen.add(target.lower())
+                    self._add_target(target, phrases, seen)
 
         # Path 2: freetext / legacy user_correction memories
         for mem in mems:
@@ -90,11 +115,19 @@ class BiasBuilder:
             if any(t in mem.tags for t in _STRUCTURED_PREFIXES):
                 continue
             target = self._extract_from_freetext(mem.content)
-            if target and target.lower() not in seen:
-                phrases.append(target)
-                seen.add(target.lower())
+            self._add_target(target, phrases, seen)
 
         return self.engine.suppress_tokens(phrases)
+
+    @staticmethod
+    def _add_target(target, phrases, seen):
+        """Add every generated-text form of a user target, once each."""
+        if not target:
+            return
+        for form in _target_variants(target):
+            if form not in seen:
+                phrases.append(form)
+                seen.add(form)
 
     def _extract_from_structured(self, content, prefixes):
         """Try each known prefix and strip the first one that matches.

@@ -1,6 +1,31 @@
 import time
 import re
+from collections import deque
 from core.memory_store import MemoryUnit, MemoryType
+
+# Who writes the agent's self-model, and from where (observer experiment).
+#   self          — the shipped design: the agent reflects on itself, with access
+#                   to its own memories (including its earlier reflections).
+#   self_informed — the same first-person reflection, also given everything the
+#                   observer sees: the interactions since the last full pass and
+#                   the user's corrections.
+#   observer      — written from outside: third-person framing, the same window
+#                   and corrections, and no access to the agent's memory store.
+#                   The writer can be the agent's own weights or another model.
+PERSPECTIVES = ("self", "self_informed", "observer")
+
+
+def _evidence_block(window, corrections):
+    """What an observer sees: recent behaviour and how the user responded to it."""
+    lines = []
+    for user, assistant in window:
+        lines.append(f"User: {user}\nAssistant: {assistant}")
+    interactions = "\n\n".join(lines) if lines else "None."
+    standing = "\n".join(f"- {c}" for c in corrections) if corrections else "None."
+    return (
+        f"Recent interactions:\n{interactions}\n\n"
+        f"User corrections so far:\n{standing}\n\n"
+    )
 
 
 # === HEURISTIC FILTER ===
@@ -92,8 +117,17 @@ class ReflectionEngine:
     """
 
     def __init__(self, engine, memory_store, max_depth=3,
-                 max_directives=6, dedup_threshold=0.50):
+                 max_directives=6, dedup_threshold=0.50,
+                 writer=None, perspective="self", window_size=3):
+        if perspective not in PERSPECTIVES:
+            raise ValueError(f"perspective must be one of {PERSPECTIVES}, got {perspective!r}")
         self.engine = engine
+        # The writer produces every reflection, directive and coherence check.
+        # Embeddings stay on the engine: they are plumbing, not authorship.
+        self.writer = writer or engine
+        self.perspective = perspective
+        self._window = deque(maxlen=window_size)
+        self._corrections = []
         self.memory = memory_store
         self.max_depth = max_depth
         self.max_directives = max_directives
@@ -147,41 +181,19 @@ class ReflectionEngine:
         """
         new_memories = []
         full_pass = (interaction_count % 3 == 0)
+        self._window.append((user_message, assistant_response))
 
         # --- Depth 0: always runs ---
-        prompt_d0 = (
-            "[INST] You are a self-reflection module analyzing an interaction.\n\n"
-            f"Interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
-            "Analyze this interaction factually:\n"
-            "1. Was the response accurate and relevant?\n"
-            "2. Did it address what the user actually asked?\n"
-            "3. Were there any errors or misunderstandings?\n\n"
-            "Be brief and specific. One paragraph. [/INST]"
-        )
+        prompt_d0 = self._prompt_d0(user_message, assistant_response)
 
         # --- Depth 1: only on full pass ---
         d1 = None
         if full_pass:
-            recent = self.memory.retrieve(user_message, top_k=5)
-            prompt_d1 = None
-            if len(recent) >= 2:
-                memory_context = "\n".join(
-                    [f"- [{m.memory_type.value}] {m.content[:150]}" for m in recent]
-                )
-                prompt_d1 = (
-                    "[INST] You are a self-reflection module analyzing patterns.\n\n"
-                    f"Current interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
-                    f"Recent memories:\n{memory_context}\n\n"
-                    "What patterns do you notice?\n"
-                    "- Recurring user needs or preferences\n"
-                    "- Consistent strengths or weaknesses in responses\n"
-                    "- Emerging themes across interactions\n\n"
-                    "Be brief and specific. One paragraph. [/INST]"
-                )
+            prompt_d1 = self._prompt_d1(user_message, assistant_response)
 
             # Batch d0 + d1 together when both run
             prompts = [prompt_d0] + ([prompt_d1] if prompt_d1 else [])
-            results = self.engine.generate_batch(prompts, max_new_tokens=200, temperature=0.3)
+            results = self.writer.generate_batch(prompts, max_new_tokens=200, temperature=0.3)
 
             d0 = MemoryUnit(
                 content=f"Reflection D0: {results[0]}",
@@ -201,7 +213,7 @@ class ReflectionEngine:
                 new_memories.append(d1)
         else:
             # Throttled: depth 0 only
-            results = self.engine.generate_batch([prompt_d0], max_new_tokens=200, temperature=0.3)
+            results = self.writer.generate_batch([prompt_d0], max_new_tokens=200, temperature=0.3)
             d0 = MemoryUnit(
                 content=f"Reflection D0: {results[0]}",
                 memory_type=MemoryType.REFLECTIVE,
@@ -223,11 +235,87 @@ class ReflectionEngine:
                 if d3:
                     new_memories.append(d3)
 
+        if full_pass:
+            self._window.clear()
+
         for mem in new_memories:
             mem.source_interaction_id = interaction_id
+            if self.perspective == "observer":
+                mem.tags.append("observer")
             self.memory.store(mem)
 
         return new_memories
+
+    def note_feedback(self, correction_text):
+        """Record a user correction. Observers (and self_informed) are shown these."""
+        if correction_text:
+            self._corrections.append(correction_text)
+
+    # --- prompts ---
+
+    def _prompt_d0(self, user_message, assistant_response):
+        if self.perspective == "observer":
+            return (
+                "[INST] You are observing an AI assistant's conversation with a user. "
+                "You are not the assistant; you are watching it from outside.\n\n"
+                f"Interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
+                "Assess the assistant's response factually:\n"
+                "1. Was the response accurate and relevant?\n"
+                "2. Did it address what the user actually asked?\n"
+                "3. Were there any errors or misunderstandings?\n\n"
+                "Be brief and specific. One paragraph. [/INST]"
+            )
+        return (
+            "[INST] You are a self-reflection module analyzing an interaction.\n\n"
+            f"Interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
+            "Analyze this interaction factually:\n"
+            "1. Was the response accurate and relevant?\n"
+            "2. Did it address what the user actually asked?\n"
+            "3. Were there any errors or misunderstandings?\n\n"
+            "Be brief and specific. One paragraph. [/INST]"
+        )
+
+    def _prompt_d1(self, user_message, assistant_response):
+        """Pattern analysis. Returns None when there is nothing to analyse."""
+        if self.perspective == "observer":
+            return (
+                "[INST] You are observing an AI assistant across several interactions with a user. "
+                "You are not the assistant; you are watching it from outside.\n\n"
+                + _evidence_block(self._window, self._corrections) +
+                "What patterns do you notice in the assistant's behavior?\n"
+                "- Recurring user needs or preferences\n"
+                "- Consistent strengths or weaknesses in its responses\n"
+                "- Whether its responses follow the user's corrections\n\n"
+                "Be brief and specific. One paragraph. [/INST]"
+            )
+
+        recent = self.memory.retrieve(user_message, top_k=5)
+        if self.perspective == "self" and len(recent) < 2:
+            return None
+        memory_context = "\n".join(
+            [f"- [{m.memory_type.value}] {m.content[:150]}" for m in recent]
+        ) or "None."
+        if self.perspective == "self_informed":
+            return (
+                "[INST] You are a self-reflection module analyzing patterns.\n\n"
+                + _evidence_block(self._window, self._corrections) +
+                f"Recent memories:\n{memory_context}\n\n"
+                "What patterns do you notice?\n"
+                "- Recurring user needs or preferences\n"
+                "- Consistent strengths or weaknesses in responses\n"
+                "- Whether responses follow the user's corrections\n\n"
+                "Be brief and specific. One paragraph. [/INST]"
+            )
+        return (
+            "[INST] You are a self-reflection module analyzing patterns.\n\n"
+            f"Current interaction:\nUser: {user_message}\nAssistant: {assistant_response}\n\n"
+            f"Recent memories:\n{memory_context}\n\n"
+            "What patterns do you notice?\n"
+            "- Recurring user needs or preferences\n"
+            "- Consistent strengths or weaknesses in responses\n"
+            "- Emerging themes across interactions\n\n"
+            "Be brief and specific. One paragraph. [/INST]"
+        )
 
     def check_correction_conflicts(self, correction_text):
         """Check if a user correction contradicts any active directive.
@@ -294,10 +382,16 @@ class ReflectionEngine:
             [f"- {d}" for d in self.directives]
         ) if self.directives else "None yet."
 
+        if self.perspective == "observer":
+            role = "[INST] You are observing an AI assistant and writing behavioral directives for it.\n\n"
+            directive_label = "Current directives for the assistant"
+        else:
+            role = "[INST] You are a self-reflection module generating behavioral directives.\n\n"
+            directive_label = "Current directives"
         prompt = (
-            "[INST] You are a self-reflection module generating behavioral directives.\n\n"
+            role +
             f"Analysis:\n" + "\n".join(context_parts) + "\n\n"
-            f"Current directives:\n{current_directives}\n\n"
+            f"{directive_label}:\n{current_directives}\n\n"
             "Based on the analysis, should any NEW directive be added?\n\n"
             "A good directive:\n"
             '- "Keep responses under 3 sentences unless asked for detail"\n'
@@ -317,7 +411,7 @@ class ReflectionEngine:
             "Single sentence only. [/INST]"
         )
 
-        result = self.engine.generate_structured(prompt, max_new_tokens=100)
+        result = self.writer.generate_structured(prompt, max_new_tokens=100)
 
         if "NO_NEW_DIRECTIVE" in result.upper():
             return None
@@ -424,7 +518,7 @@ class ReflectionEngine:
             "If in doubt, respond OK. [/INST]"
         )
 
-        result = self.engine.generate_structured(prompt, max_new_tokens=30, temperature=0.1)
+        result = self.writer.generate_structured(prompt, max_new_tokens=30, temperature=0.1)
         result_stripped = result.strip()
 
         if result_stripped.upper().startswith("CONTRADICTS"):
@@ -494,7 +588,7 @@ class ReflectionEngine:
             "Remove the less valuable of any conflicting pair. [/INST]"
         )
 
-        result = self.engine.generate_structured(prompt, max_new_tokens=200)
+        result = self.writer.generate_structured(prompt, max_new_tokens=200)
 
         if "COHERENT" in result.upper():
             return None
@@ -539,11 +633,21 @@ class ReflectionEngine:
         results = self.memory.collection.get(ids=self.directive_ids)
         units = []
         for i, mid in enumerate(results["ids"]):
-            units.append(MemoryUnit.from_chroma(
+            unit = MemoryUnit.from_chroma(
                 id=mid,
                 document=results["documents"][i],
                 metadata=results["metadatas"][i],
-            ))
+            )
+            if unit.superseded_by is None:
+                units.append(unit)
+        # A directive superseded elsewhere (InteractionLoop.feedback supersedes
+        # conflicting system directives in the store) must leave the live list
+        # too, or it keeps being injected into every prompt.
+        live = {u.id for u in units}
+        if len(live) != len(self.directive_ids):
+            keep = [i for i, mid in enumerate(self.directive_ids) if mid in live]
+            self.directives = [self.directives[i] for i in keep]
+            self.directive_ids = [self.directive_ids[i] for i in keep]
         return units
 
     def get_directive_count(self):

@@ -93,34 +93,11 @@ def chat(message, history):
 # (template label) → (content prefix, memory_type, tags, salience_score)
 # Special cases "Forget...", "Ignore...", "Freetext" are handled separately.
 
-_STRUCTURED_CORRECTIONS = {
-    # Suppression — stored as SEMANTIC, picked up by BiasBuilder for logit bias
-    "Stop saying...":  ("Stop saying",  MemoryType.SEMANTIC,   ["user_correction", "suppress_phrase"],   0.9),
-    "Stop being...":   ("Stop being",   MemoryType.SEMANTIC,   ["user_correction", "suppress_behavior"], 0.9),
-    "Don't...":        ("Don't",        MemoryType.SEMANTIC,   ["user_correction", "suppress_phrase"],   0.9),
-    "Never...":        ("Never",        MemoryType.SEMANTIC,   ["user_correction", "suppress_phrase"],   0.9),
-    "Less...":         ("Less",         MemoryType.SEMANTIC,   ["user_correction", "suppress_behavior"], 0.9),
-    # Enforcement — stored as PROCEDURAL, injected into live directive list
-    "Always...":       ("Always",       MemoryType.PROCEDURAL, ["user_correction", "directive"],         0.8),
-    "More...":         ("More",         MemoryType.PROCEDURAL, ["user_correction", "directive"],         0.8),
-    "Start...":        ("Start",        MemoryType.PROCEDURAL, ["user_correction", "directive"],         0.8),
-    "Prefer...":       ("Prefer",       MemoryType.PROCEDURAL, ["user_correction", "directive"],         0.8),
-    "When...":         ("When",         MemoryType.PROCEDURAL, ["user_correction", "directive"],         0.8),
-    # Correction — stored as SEMANTIC + triggers supersession of similar memories
-    "Actually...":     ("Actually",     MemoryType.SEMANTIC,   ["user_correction", "fact_correction"],   0.9),
-    "That's wrong...": ("That's wrong", MemoryType.SEMANTIC,   ["user_correction", "fact_correction"],   0.9),
-    "Not X...":        ("Not",          MemoryType.SEMANTIC,   ["user_correction", "fact_correction"],   0.9),
-    "Instead...":      ("Instead",      MemoryType.SEMANTIC,   ["user_correction", "fact_correction"],   0.9),
-    "Correct:":        ("Correct:",     MemoryType.SEMANTIC,   ["user_correction", "fact_correction"],   0.9),
-    # Meta — stored as SEMANTIC with descriptive tags
-    "Remember...":     ("Remember",     MemoryType.SEMANTIC,   ["user_correction", "high_priority"],     0.9),
-    "Focus on...":     ("Focus on",     MemoryType.SEMANTIC,   ["user_correction", "focus"],             0.8),
-}
-
-# Correction templates that trigger supersede_by_correction() in addition to storage
-_CORRECTION_TRIGGERS_SUPERSESSION = {
-    "Actually...", "That's wrong...", "Not X...", "Instead...", "Correct:",
-}
+# Registry lives in core/corrections.py so scripted runs share it.
+from core.corrections import (
+    STRUCTURED_CORRECTIONS as _STRUCTURED_CORRECTIONS,
+    CORRECTION_TRIGGERS_SUPERSESSION as _CORRECTION_TRIGGERS_SUPERSESSION,
+)
 
 # Full ordered list for dropdowns (same in both whole-response and segment sections)
 _ALL_CORRECTION_CHOICES = [
@@ -145,7 +122,8 @@ def _apply_structured_correction(correction_type, content):
         memory_type=mem_type,
         salience_score=salience,
         confidence=1.0,
-        tags=tags,
+        tags=list(tags),
+        origin="human",
     )
     memory.store(mem)
 
@@ -195,6 +173,7 @@ def give_feedback(rating, correction_type, correction_content, target_query):
                 salience_score=0.5,
                 confidence=1.0,
                 tags=["user_correction", "forget"],
+                origin="human",
             )
             memory.store(forget_mem)
             for m in similar:
@@ -304,6 +283,7 @@ def apply_correction(correction_type, content):
             salience_score=0.9,
             confidence=1.0,
             tags=["user_correction", "high_priority"],
+            origin="human",
         )
         memory.store(corr_mem)
         memory.supersede_by_correction(content, corr_mem.id, similarity_threshold=0.45)
@@ -317,6 +297,7 @@ def apply_correction(correction_type, content):
             salience_score=0.5,
             confidence=1.0,
             tags=["user_correction", "forget"],
+            origin="human",
         )
         memory.store(forget_mem)
         for m in similar:

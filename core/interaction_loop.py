@@ -26,7 +26,8 @@ class InteractionLoop:
     """
 
     def __init__(self, engine, memory_store, assembler, log_dir=None,
-                 metrics_dir=None, reflect=True, bias_builder=None):
+                 metrics_dir=None, reflect=True, bias_builder=None,
+                 reflection_kwargs=None):
         self.engine = engine
         self.memory = memory_store
         self.assembler = assembler
@@ -44,7 +45,8 @@ class InteractionLoop:
         self._last_verify_status = "PASS"
 
         if self.reflect_enabled:
-            self.reflection_engine = ReflectionEngine(engine, memory_store)
+            self.reflection_engine = ReflectionEngine(engine, memory_store,
+                                                      **(reflection_kwargs or {}))
 
         if metrics_dir:
             self.metrics = EvaluationMetrics(metrics_dir, memory_store)
@@ -226,6 +228,7 @@ class InteractionLoop:
 
             # Kill contradicting directives
             if self.reflection_engine:
+                self.reflection_engine.note_feedback(correction)
                 killed_directives = self.reflection_engine.check_correction_conflicts(correction)
 
             # Supersede contradicting memories

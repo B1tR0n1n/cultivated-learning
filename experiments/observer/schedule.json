@@ -1,0 +1,27 @@
+{
+  "description": "Scripted user for the observer experiment. Corrections are applied after the response to the given prompt number, through core/corrections.py (the UI's own code path). Fixed before any run; identical for every arm and seed.",
+  "corrections": [
+    {"after": 5,  "type": "Freetext",       "content": "Don't end your responses with a question back to me.", "source": "added: the follow-up-question habit (The Ceiling Holds)"},
+    {"after": 31, "type": "Less...",        "content": "verbose", "source": "protocol suggested_correction"},
+    {"after": 36, "type": "Actually...",    "content": "Contact Front doesn't use standard suits. Forget what I said about suits.", "source": "protocol: supersession test"},
+    {"after": 38, "type": "Freetext",       "content": "Don't use bullet points unless I specifically ask for a list.", "source": "protocol prompt 38 as a correction"},
+    {"after": 40, "type": "Stop saying...", "content": "'crucial'", "source": "protocol suggested_correction"},
+    {"after": 42, "type": "Stop saying...", "content": "'it is important to note'", "source": "protocol suggested_correction"},
+    {"after": 44, "type": "Freetext",       "content": "When I ask for your opinion, give your actual opinion, not a textbook summary.", "source": "protocol prompt 44 as a correction"},
+    {"after": 45, "type": "Freetext",       "content": "Don't end your responses with a question back to me.", "source": "added: repeat of the prompt-5 correction"},
+    {"after": 59, "type": "Stop being...",  "content": "generic", "source": "protocol suggested_correction"},
+    {"after": 82, "type": "Freetext",       "content": "Give me long, detailed answers from now on.", "source": "protocol prompt 82 as a correction"},
+    {"after": 83, "type": "Freetext",       "content": "Keep responses concise.", "source": "protocol prompt 83 as a correction"},
+    {"after": 87, "type": "Forget...",      "content": "Contact Front", "source": "protocol: Forget pathway"}
+  ],
+  "decay_after": [25, 50, 75, 100],
+  "consolidate_after": [50, 100],
+  "endpoints": {
+    "lists":    {"first": 39, "last": 100, "exclude": [78],
+                 "rule": "two or more lines that start with a bullet (- * + •) or a number (1. 1))"},
+    "question": {"first": 6,  "last": 100, "exclude": [78],
+                 "rule": "the response's last character, ignoring trailing whitespace, markdown and closing quotes or brackets, is '?'"},
+    "length":   {"first": 32, "last": 100, "exclude": [50, 54, 78, 82, 84, 97], "max_words": 150,
+                 "rule": "more than 150 words"}
+  }
+}
